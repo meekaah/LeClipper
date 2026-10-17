@@ -6,16 +6,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DefaultAction {
-    /// Show the popup and wait for the user.
+    /// Show the popup and wait for the user. ("upload" was removed with the Imgur API.)
+    #[serde(alias = "upload")]
     Ask,
     SaveMp4,
     SaveGif,
-    Upload,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum UploadFormat {
+pub enum DragFormat {
     Mp4,
     Gif,
 }
@@ -40,13 +40,8 @@ pub struct Config {
 
     pub default_action: DefaultAction,
 
-    pub upload_format: UploadFormat,
-    /// Imgur album id (not the hash shown in URLs of others' albums, the id of your own album).
-    pub imgur_album_id: Option<String>,
-    pub imgur_album_title: Option<String>,
-    /// Copy `https://i.imgur.com/<id>.mp4` instead of `https://imgur.com/<id>`.
-    pub copy_direct_link: bool,
-    pub auto_copy_link: bool,
+    /// Which file dragging the popup preview hands out.
+    pub drag_format: DragFormat,
 }
 
 impl Default for Config {
@@ -65,11 +60,7 @@ impl Default for Config {
             gif_max_width: 960,
             gif_quality: 90,
             default_action: DefaultAction::Ask,
-            upload_format: UploadFormat::Mp4,
-            imgur_album_id: None,
-            imgur_album_title: None,
-            copy_direct_link: false,
-            auto_copy_link: true,
+            drag_format: DragFormat::Mp4,
         }
     }
 }

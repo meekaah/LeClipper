@@ -1,6 +1,6 @@
 # screen2imgur — v1 spec
 
-Windows tray app (Rust) that records a selected screen region to MP4/GIF and saves it to disk or uploads it to Imgur.
+Windows tray app (Rust) that records a selected screen region to MP4/GIF and saves it to disk; sharing is done by dragging the file into a browser upload page.
 
 ## Decisions
 
@@ -17,9 +17,8 @@ Windows tray app (Rust) that records a selected screen region to MP4/GIF and sav
 | Video encode | Media Foundation hardware H.264 → MP4, quality/bitrate slider, no external binaries |
 | GIF encode | `gifski` (high-quality palettes), configurable fps + max width |
 | While recording | Thin red border outside the region + small floating bar (timer, Stop); both excluded from capture |
-| After stop | Quick-action popup: preview + **Save MP4**, **Save GIF**, **Upload to Imgur**, **Copy link**; configurable default action |
-| Imgur | OAuth2 login via browser + loopback redirect; uploads go to the user's account, optional target album. Imgur app credentials are compiled in (`SCREEN2IMGUR_CLIENT_ID/SECRET`), with an optional per-user override |
-| Secrets | Client ID/Secret + access/refresh tokens in Windows Credential Manager |
+| After stop | Quick-action popup: preview + **Save MP4**, **Save GIF**, **Open Imgur upload**; configurable default action |
+| Imgur | No API (Imgur stopped issuing API access). The button opens https://imgur.com/upload; the preview is a drag source (shell `SHDoDragDrop`) that drops the saved MP4/GIF onto the page |
 | Settings | `%APPDATA%\screen2imgur\config.toml`, edited in an egui settings window |
 | Output dir | Default `%USERPROFILE%\Videos\screen2imgur`, filename `screen2imgur_YYYY-MM-DD_HH-MM-SS.{mp4,gif}` |
 
@@ -29,15 +28,12 @@ Windows tray app (Rust) that records a selected screen region to MP4/GIF and sav
 - `tray-icon`, `global-hotkey`, `winit`: tray, hotkey, event loop
 - `eframe`/`egui`: settings window and post-record popup
 - `gifski` + `imgref`/`rgb`: GIF encoding
-- `reqwest` (rustls) + `tiny_http`: Imgur API and OAuth loopback
-- `keyring`: Credential Manager
-- `serde` + `toml`, `directories`, `arboard` (clipboard), `notify-rust` (toasts)
+- `serde` + `toml`, `directories`, `rfd` (folder picker), `open`
 
-## Imgur notes / risks
+## Imgur notes
 
-- The builder registers one app (once) at https://api.imgur.com/oauth2/addclient with type "OAuth 2 authorization with a callback URL" and callback `http://localhost:47892/callback`. Imgur has closed new registrations at times, so this is the first thing to check.
-- Imgur caps uploads (videos roughly 60 s / 200 MB; big GIFs get converted to MP4/GIFV). The app warns before uploading anything over the limit.
-- Free API usage is rate-limited per client and per user. Fine for personal use.
+- Imgur no longer grants API access, so v1 removed the OAuth/upload code. Sharing is a drag and drop of the saved file onto imgur.com/upload, which accepts files like any Explorer drop.
+- Imgur still caps uploads (videos roughly 60 s / 200 MB).
 
 ## Out of scope for v1
 

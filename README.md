@@ -1,19 +1,14 @@
 # screen2imgur
 
-Windows tray app that records a region of the screen to MP4 (hardware H.264, up to 60 fps) and saves it as MP4/GIF or uploads it to your Imgur account. See [SPEC.md](SPEC.md) for the design decisions.
+Windows tray app that records a region of the screen to MP4 (hardware H.264, up to 60 fps) and saves it as MP4/GIF. To share it, drag the preview straight onto the Imgur upload page (or Discord, a folder, …). See [SPEC.md](SPEC.md) for the design decisions.
 
 ## Build
 
-The Imgur API app is registered **once, by whoever builds the exe**, and compiled in. End users only click "Log in with Imgur".
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\setup-imgur-app.ps1   # once
+```bash
 cargo build --release
 ```
 
-The setup script writes `imgur-app.env` (gitignored), which `build.rs` compiles in. Setting `SCREEN2IMGUR_CLIENT_ID` / `SCREEN2IMGUR_CLIENT_SECRET` as environment variables works too, and takes precedence.
-
-Output: `target/release/screen2imgur.exe`, a single ~10 MB exe with no runtime dependencies (Windows 10 2004+ / 11). Without those variables the app still works, but every user has to enter their own Imgur app under Settings → Imgur → Advanced.
+Output: `target/release/screen2imgur.exe`, a single ~10 MB exe with no runtime dependencies (Windows 10 2004+ / 11).
 
 ## Use
 
@@ -21,28 +16,20 @@ Output: `target/release/screen2imgur.exe`, a single ~10 MB exe with no runtime d
 2. Press **Ctrl+Shift+R** (or left-click the tray icon).
 3. Drag a rectangle. A click or **Enter** selects the whole monitor; **Esc** or right-click cancels.
 4. A red border and a small timer bar show while recording. Neither is captured. Stop with the hotkey, the bar's **Stop** button, or the tray icon.
-5. In the popup, choose **Save MP4**, **Save GIF**, or **Upload to Imgur** (as MP4 or GIF), then **Copy link**.
+5. In the popup, choose **Save MP4** or **Save GIF**, or share it (below).
 
 Right-click the tray icon for Settings, the output folder, and Quit.
 
-## Imgur setup
+## Sharing to Imgur (drag and drop)
 
-One-time, for the person building the exe: run `scripts\setup-imgur-app.ps1`. Imgur has no API for creating apps, so the script opens the registration form (you need to be logged in to Imgur) and shows what to enter:
+Imgur no longer hands out API access, so there's no direct upload. Instead:
 
-- Authorization type: **OAuth 2 authorization with a callback URL**
-- Callback URL: `http://localhost:47892/callback`
+1. Click **Open Imgur upload** in the popup. It opens <https://imgur.com/upload> in your browser.
+2. Drag the popup's preview onto that page and drop it. Imgur uploads it like any file dropped from Explorer.
 
-You paste the Client ID and Secret back into the script. It checks the ID against the Imgur API and saves both to `imgur-app.env`.
+Dragging first saves the clip to your output folder (MP4 or GIF, picked by the "drag MP4 / drag GIF" selector next to the button). The browser reads that saved file, so closing the popup mid-upload is safe. The same drag works into Discord, chat apps, Explorer, etc. If you choose GIF and it hasn't been made yet, the first drag starts the export; drag again once it's saved.
 
-For each user: Settings → **Log in with Imgur**, approve in the browser, and optionally **Load albums** to pick a target album. Users who want their own API quota can enter their own app under **Advanced**, which overrides the built-in one.
-
-Notes on the built-in app:
-- A secret compiled into a distributed exe can be extracted. That's normal for desktop apps (ShareX does the same), but treat it as public: the worst case is someone else using your app's quota.
-- All users of a build share that app's Imgur rate limit.
-
-A custom Client ID/Secret and the OAuth tokens are stored in Windows Credential Manager (entries named `screen2imgur`). Other settings live in `%APPDATA%\screen2imgur\config.toml`, and errors are logged to `%APPDATA%\screen2imgur\log.txt`.
-
-Imgur limits videos to about 60 s / 200 MB.
+Settings live in `%APPDATA%\screen2imgur\config.toml`, and errors are logged to `%APPDATA%\screen2imgur\log.txt`.
 
 ## How it works
 
@@ -54,7 +41,7 @@ Imgur limits videos to about 60 s / 200 MB.
 | Media Foundation sink writer (H.264/MP4) | `src/mp4enc.rs` |
 | MP4 decode for GIF/preview | `src/decode.rs` |
 | GIF via gifski | `src/gif.rs` |
-| OAuth, upload, albums | `src/imgur.rs` |
+| Drag a file out of the popup (shell OLE drag) | `src/shell_drag.rs` |
 | Settings / popup windows (egui) | `src/ui_settings.rs`, `src/ui_popup.rs` |
 
 Settings and the popup run as child processes (`screen2imgur.exe settings`, `screen2imgur.exe popup …`), so the tray process stays a plain Win32 message loop.
