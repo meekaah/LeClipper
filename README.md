@@ -6,9 +6,12 @@ Windows tray app that records a region of the screen to MP4 (hardware H.264, up 
 
 The Imgur API app is registered **once, by whoever builds the exe**, and compiled in. End users only click "Log in with Imgur".
 
-```bash
-SCREEN2IMGUR_CLIENT_ID=xxxx SCREEN2IMGUR_CLIENT_SECRET=yyyy cargo build --release
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup-imgur-app.ps1   # once
+cargo build --release
 ```
+
+The setup script writes `imgur-app.env` (gitignored), which `build.rs` compiles in. Setting `SCREEN2IMGUR_CLIENT_ID` / `SCREEN2IMGUR_CLIENT_SECRET` as environment variables works too, and takes precedence.
 
 Output: `target/release/screen2imgur.exe`, a single ~10 MB exe with no runtime dependencies (Windows 10 2004+ / 11). Without those variables the app still works, but every user has to enter their own Imgur app under Settings → Imgur → Advanced.
 
@@ -24,12 +27,12 @@ Right-click the tray icon for Settings, the output folder, and Quit.
 
 ## Imgur setup
 
-One-time, for the person building the exe:
+One-time, for the person building the exe: run `scripts\setup-imgur-app.ps1`. Imgur has no API for creating apps, so the script opens the registration form (you need to be logged in to Imgur) and shows what to enter:
 
-1. Register an app at <https://api.imgur.com/oauth2/addclient>:
-   - Authorization type: **OAuth 2 authorization with a callback URL**
-   - Callback URL: `http://localhost:47892/callback`
-2. Build with `SCREEN2IMGUR_CLIENT_ID` / `SCREEN2IMGUR_CLIENT_SECRET` set (see Build).
+- Authorization type: **OAuth 2 authorization with a callback URL**
+- Callback URL: `http://localhost:47892/callback`
+
+You paste the Client ID and Secret back into the script. It checks the ID against the Imgur API and saves both to `imgur-app.env`.
 
 For each user: Settings → **Log in with Imgur**, approve in the browser, and optionally **Load albums** to pick a target album. Users who want their own API quota can enter their own app under **Advanced**, which overrides the built-in one.
 
