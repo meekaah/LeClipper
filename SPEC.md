@@ -18,7 +18,7 @@ Windows tray app (Rust) that records a selected screen region to MP4/GIF and sav
 | GIF encode | `gifski` (high-quality palettes), configurable fps + max width |
 | While recording | Thin red border outside the region + small floating bar (timer, Stop); both excluded from capture |
 | After stop | Quick-action popup: preview + **Save MP4**, **Save GIF**, **Upload to Imgur**, **Copy link**; configurable default action |
-| Imgur | OAuth2 login via browser + loopback redirect; uploads go to the user's account, optional target album |
+| Imgur | OAuth2 login via browser + loopback redirect; uploads go to the user's account, optional target album. Imgur app credentials are compiled in (`SCREEN2IMGUR_CLIENT_ID/SECRET`), with an optional per-user override |
 | Secrets | Client ID/Secret + access/refresh tokens in Windows Credential Manager |
 | Settings | `%APPDATA%\screen2imgur\config.toml`, edited in an egui settings window |
 | Output dir | Default `%USERPROFILE%\Videos\screen2imgur`, filename `screen2imgur_YYYY-MM-DD_HH-MM-SS.{mp4,gif}` |
@@ -35,7 +35,7 @@ Windows tray app (Rust) that records a selected screen region to MP4/GIF and sav
 
 ## Imgur notes / risks
 
-- You need to register an app at https://api.imgur.com/oauth2/addclient with type "OAuth 2 authorization with a callback URL" and callback `http://localhost:47892/callback`. Imgur has closed new registrations at times, so this is the first thing to check.
+- The builder registers one app (once) at https://api.imgur.com/oauth2/addclient with type "OAuth 2 authorization with a callback URL" and callback `http://localhost:47892/callback`. Imgur has closed new registrations at times, so this is the first thing to check.
 - Imgur caps uploads (videos roughly 60 s / 200 MB; big GIFs get converted to MP4/GIFV). The app warns before uploading anything over the limit.
 - Free API usage is rate-limited per client and per user. Fine for personal use.
 

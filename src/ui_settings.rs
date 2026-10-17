@@ -45,8 +45,8 @@ impl SettingsApp {
     fn new() -> Self {
         Self {
             cfg: Config::load(),
-            client_id: secrets::client_id().unwrap_or_default(),
-            client_secret: secrets::client_secret().unwrap_or_default(),
+            client_id: secrets::custom_client().0,
+            client_secret: secrets::custom_client().1,
             account: secrets::tokens().map(|t| t.account_username),
             login: None,
             albums: Vec::new(),
@@ -64,7 +64,9 @@ impl SettingsApp {
             return Err(anyhow!("Invalid hotkey: {e}"));
         }
         self.cfg.save()?;
-        secrets::set_client(&self.client_id, &self.client_secret)?;
+        secrets::set_custom_client(&self.client_id, &self.client_secret)?;
+        // Tokens from a different Imgur app no longer apply.
+        self.account = secrets::tokens().map(|t| t.account_username);
         Ok(())
     }
 
@@ -215,24 +217,7 @@ impl eframe::App for SettingsApp {
 
                 ui.add_space(12.0);
                 ui.heading("Imgur");
-                ui.horizontal_wrapped(|ui| {
-                    ui.weak("Register an app at");
-                    ui.hyperlink_to("api.imgur.com/oauth2/addclient", "https://api.imgur.com/oauth2/addclient");
-                    ui.weak("with \"OAuth 2 authorization with a callback URL\" and callback");
-                    ui.code(imgur::CALLBACK_URL);
-                    if ui.small_button("Copy").clicked() {
-                        ctx.copy_text(imgur::CALLBACK_URL.into());
-                    }
-                });
-                ui.add_space(4.0);
                 egui::Grid::new("imgur").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                    ui.label("Client ID");
-                    ui.add(egui::TextEdit::singleline(&mut self.client_id).desired_width(300.0));
-                    ui.end_row();
-                    ui.label("Client Secret");
-                    ui.add(egui::TextEdit::singleline(&mut self.client_secret).password(true).desired_width(300.0));
-                    ui.end_row();
-
                     ui.label("Account");
                     ui.horizontal(|ui| {
                         if let Some((_, cancel)) = &self.login {
@@ -253,9 +238,10 @@ impl eframe::App for SettingsApp {
                                 }
                             }
                         } else {
-                            let ready = !self.client_id.trim().is_empty() && !self.client_secret.trim().is_empty();
+                            let custom = !self.client_id.trim().is_empty() && !self.client_secret.trim().is_empty();
+                            let ready = custom || secrets::builtin_client().is_some();
                             if ui.add_enabled(ready, egui::Button::new("Log in with Imgur")).clicked() {
-                                match secrets::set_client(&self.client_id, &self.client_secret) {
+                                match secrets::set_custom_client(&self.client_id, &self.client_secret) {
                                     Ok(()) => {
                                         let (tx, rx) = mpsc::channel();
                                         let cancel = Arc::new(AtomicBool::new(false));
@@ -269,7 +255,7 @@ impl eframe::App for SettingsApp {
                                 }
                             }
                             if !ready {
-                                ui.weak("Enter Client ID and Secret first");
+                                ui.weak("Set up an Imgur app under Advanced below");
                             }
                         }
                     });
@@ -319,6 +305,39 @@ impl eframe::App for SettingsApp {
                     });
                     ui.end_row();
                 });
+                ui.add_space(8.0);
+                let builtin = secrets::builtin_client().is_some();
+                egui::CollapsingHeader::new("Advanced: use your own Imgur app")
+                    .default_open(!builtin)
+                    .show(ui, |ui| {
+                        if !builtin {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(230, 160, 40),
+                                "This build has no built-in Imgur app, so you need to register one.",
+                            );
+                        } else {
+                            ui.weak("Optional. Leave both fields empty to use the app built into screen2imgur.");
+                        }
+                        ui.horizontal_wrapped(|ui| {
+                            ui.weak("Register an app at");
+                            ui.hyperlink_to("api.imgur.com/oauth2/addclient", "https://api.imgur.com/oauth2/addclient");
+                            ui.weak("with \"OAuth 2 authorization with a callback URL\" and callback");
+                            ui.code(imgur::CALLBACK_URL);
+                            if ui.small_button("Copy").clicked() {
+                                ctx.copy_text(imgur::CALLBACK_URL.into());
+                            }
+                        });
+                        ui.add_space(4.0);
+                        egui::Grid::new("imgur_app").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                            ui.label("Client ID");
+                            ui.add(egui::TextEdit::singleline(&mut self.client_id).desired_width(300.0));
+                            ui.end_row();
+                            ui.label("Client Secret");
+                            ui.add(egui::TextEdit::singleline(&mut self.client_secret).password(true).desired_width(300.0));
+                            ui.end_row();
+                        });
+                        ui.weak("Switching apps requires logging in again.");
+                    });
                 ui.add_space(8.0);
                 ui.weak("Imgur limits videos to about 60 seconds / 200 MB. Credentials and tokens are stored in Windows Credential Manager.");
             });

@@ -24,9 +24,9 @@ fn client() -> Result<reqwest::blocking::Client> {
 }
 
 fn credentials() -> Result<(String, String)> {
-    let id = secrets::client_id().context("Set your Imgur Client ID in Settings first")?;
-    let secret = secrets::client_secret().context("Set your Imgur Client Secret in Settings first")?;
-    Ok((id, secret))
+    secrets::client().context(
+        "This build has no built-in Imgur app. Add your own under Settings → Imgur → Advanced.",
+    )
 }
 
 fn now() -> i64 {
@@ -43,12 +43,13 @@ struct TokenResponse {
 }
 
 impl TokenResponse {
-    fn into_tokens(self) -> Tokens {
+    fn into_tokens(self, client_id: &str) -> Tokens {
         Tokens {
             access_token: self.access_token,
             refresh_token: self.refresh_token,
             expires_at: now() + self.expires_in,
             account_username: self.account_username,
+            client_id: client_id.to_string(),
         }
     }
 }
@@ -61,7 +62,8 @@ fn token_request(form: &[(&str, &str)]) -> Result<Tokens> {
         bail!("Imgur token request failed ({status}): {}", api_error(&body));
     }
     let t: TokenResponse = serde_json::from_str(&body).context("unexpected token response")?;
-    Ok(t.into_tokens())
+    let client_id = form.iter().find(|(k, _)| *k == "client_id").map(|(_, v)| *v).unwrap_or_default();
+    Ok(t.into_tokens(client_id))
 }
 
 fn refresh(tokens: &Tokens) -> Result<Tokens> {
@@ -159,6 +161,7 @@ pub fn login(cancel: Arc<AtomicBool>) -> Result<Tokens> {
                             refresh_token: get("refresh_token").context("missing refresh_token")?.into(),
                             expires_at: now() + get("expires_in").and_then(|v| v.parse().ok()).unwrap_or(3600),
                             account_username: get("account_username").unwrap_or_default().into(),
+                            client_id: client_id.clone(),
                         })
                     })();
                     return finish(req, t);

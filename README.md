@@ -4,11 +4,13 @@ Windows tray app that records a region of the screen to MP4 (hardware H.264, up 
 
 ## Build
 
+The Imgur API app is registered **once, by whoever builds the exe**, and compiled in. End users only click "Log in with Imgur".
+
 ```bash
-cargo build --release
+SCREEN2IMGUR_CLIENT_ID=xxxx SCREEN2IMGUR_CLIENT_SECRET=yyyy cargo build --release
 ```
 
-Output: `target/release/screen2imgur.exe`, a single ~10 MB exe with no runtime dependencies (Windows 10 2004+ / 11).
+Output: `target/release/screen2imgur.exe`, a single ~10 MB exe with no runtime dependencies (Windows 10 2004+ / 11). Without those variables the app still works, but every user has to enter their own Imgur app under Settings → Imgur → Advanced.
 
 ## Use
 
@@ -22,13 +24,20 @@ Right-click the tray icon for Settings, the output folder, and Quit.
 
 ## Imgur setup
 
+One-time, for the person building the exe:
+
 1. Register an app at <https://api.imgur.com/oauth2/addclient>:
    - Authorization type: **OAuth 2 authorization with a callback URL**
    - Callback URL: `http://localhost:47892/callback`
-2. In Settings, enter the Client ID and Client Secret, then click **Log in with Imgur** and approve in the browser.
-3. Optionally click **Load albums** and pick a target album.
+2. Build with `SCREEN2IMGUR_CLIENT_ID` / `SCREEN2IMGUR_CLIENT_SECRET` set (see Build).
 
-The Client ID/Secret and OAuth tokens are stored in Windows Credential Manager (entries named `screen2imgur`). Other settings live in `%APPDATA%\screen2imgur\config.toml`, and errors are logged to `%APPDATA%\screen2imgur\log.txt`.
+For each user: Settings → **Log in with Imgur**, approve in the browser, and optionally **Load albums** to pick a target album. Users who want their own API quota can enter their own app under **Advanced**, which overrides the built-in one.
+
+Notes on the built-in app:
+- A secret compiled into a distributed exe can be extracted. That's normal for desktop apps (ShareX does the same), but treat it as public: the worst case is someone else using your app's quota.
+- All users of a build share that app's Imgur rate limit.
+
+A custom Client ID/Secret and the OAuth tokens are stored in Windows Credential Manager (entries named `screen2imgur`). Other settings live in `%APPDATA%\screen2imgur\config.toml`, and errors are logged to `%APPDATA%\screen2imgur\log.txt`.
 
 Imgur limits videos to about 60 s / 200 MB.
 
