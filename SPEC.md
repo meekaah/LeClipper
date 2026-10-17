@@ -17,7 +17,7 @@ Windows tray app (Rust) that records a selected screen region to MP4/GIF and sav
 | Video encode | Media Foundation hardware H.264 → MP4, quality/bitrate slider, no external binaries |
 | GIF encode | `gifski` (high-quality palettes), configurable fps + max width |
 | While recording | Thin red border outside the region + small floating bar (timer, Stop); both excluded from capture |
-| After stop | Quick-action popup: preview + **Save MP4**, **Save GIF**, **Open Imgur upload**; configurable default action |
+| After stop | Quick-action popup: looping preview (click to pause, drag to share) + **Save MP4**, **Save GIF**, **Open Imgur upload**; configurable default action |
 | Imgur | No API (Imgur stopped issuing API access). The button opens https://imgur.com/upload; the preview is a drag source (shell `SHDoDragDrop`) that drops the saved MP4/GIF onto the page |
 | Settings | `%APPDATA%\screen2imgur\config.toml`, edited in an egui settings window |
 | Output dir | Default `%USERPROFILE%\Videos\screen2imgur`, filename `screen2imgur_YYYY-MM-DD_HH-MM-SS.{mp4,gif}` |

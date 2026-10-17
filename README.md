@@ -16,7 +16,7 @@ Output: `target/release/screen2imgur.exe`, a single ~10 MB exe with no runtime d
 2. Press **Ctrl+Shift+R** (or left-click the tray icon).
 3. Drag a rectangle. A click or **Enter** selects the whole monitor; **Esc** or right-click cancels.
 4. A red border and a small timer bar show while recording. Neither is captured. Stop with the hotkey, the bar's **Stop** button, or the tray icon.
-5. In the popup, choose **Save MP4** or **Save GIF**, or share it (below).
+5. The popup plays the clip on a loop (click it to pause). Choose **Save MP4** or **Save GIF**, or share it (below).
 
 Right-click the tray icon for Settings, the output folder, and Quit.
 
@@ -42,6 +42,7 @@ Settings live in `%APPDATA%\screen2imgur\config.toml`, and errors are logged to 
 | MP4 decode for GIF/preview | `src/decode.rs` |
 | GIF via gifski | `src/gif.rs` |
 | Drag a file out of the popup (shell OLE drag) | `src/shell_drag.rs` |
+| Looping preview (decoded once, downscaled, memory-capped) | `src/preview.rs` |
 | Settings / popup windows (egui) | `src/ui_settings.rs`, `src/ui_popup.rs` |
 
 Settings and the popup run as child processes (`screen2imgur.exe settings`, `screen2imgur.exe popup …`), so the tray process stays a plain Win32 message loop.

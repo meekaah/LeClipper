@@ -7,6 +7,7 @@ mod gif;
 mod icon;
 mod mp4enc;
 mod overlay;
+mod preview;
 mod shell_drag;
 mod tray;
 mod ui_popup;

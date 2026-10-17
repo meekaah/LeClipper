@@ -67,8 +67,7 @@ struct Popup {
     args: Args,
     cfg: Config,
     base_name: String,
-    thumb: Option<egui::TextureHandle>,
-    thumb_rx: Option<Receiver<Option<egui::ColorImage>>>,
+    preview: crate::preview::Preview,
     drag_format: DragFormat,
     job: Option<Job>,
     saved: Vec<PathBuf>,
@@ -80,26 +79,18 @@ struct Popup {
 impl Popup {
     fn new(cc: &eframe::CreationContext, args: Args) -> Self {
         let cfg = Config::load();
-        let (tx, rx) = mpsc::channel();
-        let path = args.path.clone();
-        let crop = (args.width, args.height);
-        let ctx = cc.egui_ctx.clone();
-        std::thread::spawn(move || {
-            let mut img = None;
-            let _ = crate::decode::for_each_frame(&path, Some(crop), |f| {
-                img = Some(egui::ColorImage::from_rgba_unmultiplied([f.width as usize, f.height as usize], &f.rgba));
-                Ok(false)
-            });
-            let _ = tx.send(img);
-            ctx.request_repaint();
-        });
+        let preview = crate::preview::Preview::start(
+            &cc.egui_ctx,
+            args.path.clone(),
+            (args.width, args.height),
+            args.duration_ms,
+        );
         Self {
             base_name: format!("screen2imgur_{}", chrono::Local::now().format("%Y-%m-%d_%H-%M-%S")),
             drag_format: cfg.drag_format,
             cfg,
             args,
-            thumb: None,
-            thumb_rx: Some(rx),
+            preview,
             job: None,
             saved: Vec::new(),
             message: None,
@@ -249,12 +240,6 @@ impl Popup {
 
 impl eframe::App for Popup {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if let Some(rx) = &self.thumb_rx {
-            if let Ok(img) = rx.try_recv() {
-                self.thumb_rx = None;
-                self.thumb = img.map(|i| ctx.load_texture("thumb", i, egui::TextureOptions::LINEAR));
-            }
-        }
         self.poll();
         if self.job.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
@@ -293,29 +278,40 @@ impl eframe::App for Popup {
 
             let avail = ui.available_width();
             let max_h = (ui.available_height() - 190.0).max(120.0);
-            match &self.thumb {
-                Some(t) => {
-                    let [w, h] = t.size_vec2().into();
-                    let scale = (avail / w).min(max_h / h).min(1.0);
+            // Size from the real recording; the preview frames are smaller and get scaled up.
+            let (w, h) = (self.args.width.max(1) as f32, self.args.height.max(1) as f32);
+            let scale = (avail / w).min(max_h / h).min(1.0);
+            let size = egui::vec2(w * scale, h * scale);
+            let paused = self.preview.paused();
+            match self.preview.frame(ctx).map(|t| t.id()) {
+                Some(tex) => {
                     let resp = ui
                         .vertical_centered(|ui| {
-                            ui.add(
-                                egui::Image::new((t.id(), egui::vec2(w * scale, h * scale)))
-                                    .sense(egui::Sense::click_and_drag()),
-                            )
+                            ui.add(egui::Image::new((tex, size)).sense(egui::Sense::click_and_drag()))
                         })
                         .inner;
+                    if paused {
+                        ui.painter().text(
+                            resp.rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "⏸",
+                            egui::FontId::proportional(48.0),
+                            egui::Color32::from_white_alpha(200),
+                        );
+                    }
                     let resp = resp.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text(
-                        "Drag onto the Imgur upload page, Discord, a folder… (saves the file first)",
+                        "Drag onto the Imgur upload page, Discord, a folder… (saves the file first). Click to pause.",
                     );
                     if resp.drag_started() {
                         self.start_drag(ctx);
+                    } else if resp.clicked() {
+                        self.preview.toggle_pause();
                     }
                     ui.vertical_centered(|ui| {
-                        ui.weak("Drag the preview to drop the file anywhere");
+                        ui.weak("Drag the preview to drop the file anywhere · click to pause");
                     });
                 }
-                None if self.thumb_rx.is_some() => {
+                None if self.preview.loading() => {
                     ui.vertical_centered(|ui| ui.spinner());
                 }
                 None => {
