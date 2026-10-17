@@ -4,6 +4,7 @@ mod capture;
 mod config;
 mod decode;
 mod gif;
+mod hdr;
 mod icon;
 mod mp4enc;
 mod overlay;

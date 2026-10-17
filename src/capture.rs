@@ -1,5 +1,10 @@
 //! Region recording: Windows.Graphics.Capture on one monitor, GPU crop into a staging
 //! texture, paced to the target fps and fed to the MP4 writer.
+//!
+//! On an HDR monitor the frames are captured as scRGB (FP16) and converted to sRGB on the
+//! GPU using the monitor's SDR white level. Capturing HDR as BGRA8 directly makes Windows
+//! do its own conversion, which ignores the "SDR content brightness" setting and comes
+//! out much brighter than what is on screen.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,9 +20,13 @@ use windows::Graphics::Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Win32::Foundation::HMODULE;
-use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+use windows::Win32::Graphics::Direct3D::Fxc::{D3DCompile, D3DCOMPILE_OPTIMIZATION_LEVEL3};
+use windows::Win32::Graphics::Direct3D::{ID3DBlob, D3D_DRIVER_TYPE_HARDWARE};
 use windows::Win32::Graphics::Direct3D11::*;
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
+    DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC,
+};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::Win32::System::WinRT::Direct3D11::{
@@ -104,9 +113,40 @@ pub fn start(region: Region, cfg: &Config) -> Result<Recording> {
     }
 }
 
+/// GPU pass that turns an FP16 scRGB crop into 8-bit sRGB (stored in BGRA byte order).
+struct ToneMap {
+    /// FP16 crop of the captured frame; frames are copied here instead of into `staging`.
+    crop: ID3D11Texture2D,
+    out: ID3D11Texture2D,
+    srv: Option<ID3D11ShaderResourceView>,
+    uav: Option<ID3D11UnorderedAccessView>,
+    cbuf: Option<ID3D11Buffer>,
+    shader: ID3D11ComputeShader,
+    groups: (u32, u32),
+}
+
+const TONEMAP_HLSL: &str = r#"
+Texture2D<float4> src : register(t0);
+RWTexture2D<unorm float4> dst : register(u0);
+cbuffer C : register(b0) { float inv_white; float3 pad; };
+
+[numthreads(8, 8, 1)]
+void main(uint3 id : SV_DispatchThreadID) {
+    uint w, h;
+    dst.GetDimensions(w, h);
+    if (id.x >= w || id.y >= h) return;
+    // scRGB is linear BT.709 with 1.0 = 80 nits; SDR white maps to 1.0, brighter clips.
+    float3 c = saturate(src[id.xy].rgb * inv_white);
+    float3 s = c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+    // The texture is RGBA8 but the encoder reads BGRA bytes, so store swizzled.
+    dst[id.xy] = float4(s.bgr, 1.0);
+}
+"#;
+
 struct Pipeline {
     ctx: ID3D11DeviceContext,
     staging: ID3D11Texture2D,
+    tonemap: Option<ToneMap>,
     pool: Direct3D11CaptureFramePool,
     session: windows::Graphics::Capture::GraphicsCaptureSession,
     writer: Mp4Writer,
@@ -156,27 +196,29 @@ fn setup(s: &Settings) -> Result<Pipeline> {
         }
         let src_box = D3D11_BOX { left, top, front: 0, right: left + r.w, bottom: top + r.h, back: 1 };
 
-        let desc = D3D11_TEXTURE2D_DESC {
-            Width: r.w,
-            Height: r.h,
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-            Usage: D3D11_USAGE_STAGING,
-            BindFlags: 0,
-            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-            MiscFlags: 0,
+        let tonemap = match crate::hdr::sdr_white_scale(HMONITOR(s.region.monitor as _)) {
+            Some(white) => {
+                crate::log(&format!("HDR monitor, SDR white = {:.0} nits", white * 80.0));
+                Some(create_tonemap(&device, r.w, r.h, white)?)
+            }
+            None => None,
         };
-        let mut staging: Option<ID3D11Texture2D> = None;
-        device.CreateTexture2D(&desc, None, Some(&mut staging))?;
-        let staging = staging.context("staging texture")?;
+        // RGBA8 holding BGRA bytes when tone mapping (UAVs can't be BGRA), else plain BGRA8.
+        let staging_format =
+            if tonemap.is_some() { DXGI_FORMAT_R8G8B8A8_UNORM } else { DXGI_FORMAT_B8G8R8A8_UNORM };
+        let staging = create_texture(
+            &device, r.w, r.h, staging_format, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ.0 as u32,
+        )?;
 
         let writer = Mp4Writer::create(&s.path, r.w, r.h, s.fps, s.bitrate)?;
 
         let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
             &winrt_device,
-            DirectXPixelFormat::B8G8R8A8UIntNormalized,
+            if tonemap.is_some() {
+                DirectXPixelFormat::R16G16B16A16Float
+            } else {
+                DirectXPixelFormat::B8G8R8A8UIntNormalized
+            },
             2,
             size,
         )?;
@@ -193,7 +235,97 @@ fn setup(s: &Settings) -> Result<Pipeline> {
         let _ = session.SetIsBorderRequired(false);
         session.StartCapture()?;
 
-        Ok(Pipeline { ctx, staging, pool, session, writer, frame_rx, src_box })
+        Ok(Pipeline { ctx, staging, tonemap, pool, session, writer, frame_rx, src_box })
+    }
+}
+
+fn create_texture(
+    device: &ID3D11Device,
+    w: u32,
+    h: u32,
+    format: DXGI_FORMAT,
+    usage: D3D11_USAGE,
+    bind: u32,
+    cpu: u32,
+) -> Result<ID3D11Texture2D> {
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: w,
+        Height: h,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: format,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Usage: usage,
+        BindFlags: bind,
+        CPUAccessFlags: cpu,
+        MiscFlags: 0,
+    };
+    let mut tex: Option<ID3D11Texture2D> = None;
+    unsafe { device.CreateTexture2D(&desc, None, Some(&mut tex))? };
+    tex.context("CreateTexture2D")
+}
+
+fn blob_bytes(b: &ID3DBlob) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(b.GetBufferPointer() as *const u8, b.GetBufferSize()) }
+}
+
+fn create_tonemap(device: &ID3D11Device, w: u32, h: u32, white: f32) -> Result<ToneMap> {
+    unsafe {
+        let crop = create_texture(
+            device, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_USAGE_DEFAULT,
+            D3D11_BIND_SHADER_RESOURCE.0 as u32, 0,
+        )?;
+        let out = create_texture(
+            device, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_USAGE_DEFAULT,
+            D3D11_BIND_UNORDERED_ACCESS.0 as u32, 0,
+        )?;
+        let mut srv = None;
+        device.CreateShaderResourceView(&crop, None, Some(&mut srv))?;
+        let mut uav = None;
+        device.CreateUnorderedAccessView(&out, None, Some(&mut uav))?;
+
+        let consts = [1.0 / white, 0.0, 0.0, 0.0f32];
+        let cb_desc = D3D11_BUFFER_DESC {
+            ByteWidth: std::mem::size_of_val(&consts) as u32,
+            Usage: D3D11_USAGE_IMMUTABLE,
+            BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
+            ..Default::default()
+        };
+        let init = D3D11_SUBRESOURCE_DATA { pSysMem: consts.as_ptr().cast(), ..Default::default() };
+        let mut cbuf = None;
+        device.CreateBuffer(&cb_desc, Some(&init), Some(&mut cbuf))?;
+
+        let mut code: Option<ID3DBlob> = None;
+        let mut errors: Option<ID3DBlob> = None;
+        if let Err(e) = D3DCompile(
+            TONEMAP_HLSL.as_ptr().cast(),
+            TONEMAP_HLSL.len(),
+            windows::core::s!("tonemap"),
+            None,
+            None,
+            windows::core::s!("main"),
+            windows::core::s!("cs_5_0"),
+            D3DCOMPILE_OPTIMIZATION_LEVEL3,
+            0,
+            &mut code,
+            Some(&mut errors),
+        ) {
+            let msg = errors.as_ref().map(|b| String::from_utf8_lossy(blob_bytes(b)).into_owned());
+            bail!("compiling HDR tone-map shader: {e} {}", msg.unwrap_or_default());
+        }
+        let code = code.context("no shader bytecode")?;
+        let mut shader = None;
+        device.CreateComputeShader(blob_bytes(&code), None, Some(&mut shader))?;
+
+        Ok(ToneMap {
+            crop,
+            out,
+            srv,
+            uav,
+            cbuf,
+            shader: shader.context("CreateComputeShader")?,
+            groups: (w.div_ceil(8), h.div_ceil(8)),
+        })
     }
 }
 
@@ -237,7 +369,8 @@ fn run(s: Settings, stop: Arc<AtomicBool>, init_tx: mpsc::Sender<Result<()>>) ->
                 unsafe {
                     let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
                     let tex: ID3D11Texture2D = access.GetInterface()?;
-                    p.ctx.CopySubresourceRegion(&p.staging, 0, 0, 0, 0, &tex, 0, Some(&p.src_box));
+                    let dst = p.tonemap.as_ref().map_or(&p.staging, |t| &t.crop);
+                    p.ctx.CopySubresourceRegion(dst, 0, 0, 0, 0, &tex, 0, Some(&p.src_box));
                 }
                 let _ = frame.Close();
                 have_new = true;
@@ -287,6 +420,17 @@ fn run(s: Settings, stop: Arc<AtomicBool>, init_tx: mpsc::Sender<Result<()>>) ->
 
 fn write_staging(p: &mut Pipeline, time: i64, duration: i64) -> Result<()> {
     unsafe {
+        if let Some(t) = &p.tonemap {
+            p.ctx.CSSetShader(&t.shader, None);
+            p.ctx.CSSetShaderResources(0, Some(&[t.srv.clone()]));
+            p.ctx.CSSetUnorderedAccessViews(0, 1, Some(&t.uav), None);
+            p.ctx.CSSetConstantBuffers(0, Some(&[t.cbuf.clone()]));
+            p.ctx.Dispatch(t.groups.0, t.groups.1, 1);
+            // Unbind so `crop` can be a copy destination again.
+            p.ctx.CSSetShaderResources(0, Some(&[None]));
+            p.ctx.CSSetUnorderedAccessViews(0, 1, Some(&None), None);
+            p.ctx.CopyResource(&p.staging, &t.out);
+        }
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         p.ctx.Map(&p.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
         let r = p.writer.write(mapped.pData as *const u8, mapped.RowPitch as usize, time, duration);
