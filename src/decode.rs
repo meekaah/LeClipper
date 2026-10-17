@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use windows::core::{Interface, HSTRING, PCWSTR};
+use windows::core::{Interface, GUID, HSTRING, PCWSTR};
 use windows::Win32::Media::MediaFoundation::*;
 
 pub struct Frame {
@@ -21,6 +21,29 @@ const FIRST_VIDEO: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 pub fn for_each_frame(
     path: &Path,
     crop: Option<(u32, u32)>,
+    on_frame: impl FnMut(Frame) -> Result<bool>,
+) -> Result<()> {
+    read_frames(path, crop, None, false, on_frame)
+}
+
+/// Like [`for_each_frame`], but Media Foundation decodes and scales the frames to `size`
+/// on the GPU when it can, which is far cheaper than converting full-size frames and
+/// shrinking them afterwards. With `repeat`, it starts over at the end of the stream
+/// (timestamps restart too) until `on_frame` returns `false`.
+pub fn for_each_frame_scaled(
+    path: &Path,
+    size: (u32, u32),
+    repeat: bool,
+    on_frame: impl FnMut(Frame) -> Result<bool>,
+) -> Result<()> {
+    read_frames(path, Some(size), Some(size), repeat, on_frame)
+}
+
+fn read_frames(
+    path: &Path,
+    crop: Option<(u32, u32)>,
+    scale_to: Option<(u32, u32)>,
+    repeat: bool,
     mut on_frame: impl FnMut(Frame) -> Result<bool>,
 ) -> Result<()> {
     unsafe {
@@ -33,7 +56,19 @@ pub fn for_each_frame(
         let mut attrs: Option<IMFAttributes> = None;
         MFCreateAttributes(&mut attrs, 1)?;
         let attrs = attrs.context("MFCreateAttributes")?;
-        attrs.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)?;
+        // Kept alive for as long as the reader uses it.
+        let mut _gpu: Option<IMFDXGIDeviceManager> = None;
+        if scale_to.is_some() {
+            // Only the advanced video processor can resize. With a D3D device it decodes and
+            // scales on the GPU; without one it falls back to (multithreaded) software.
+            attrs.SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)?;
+            if let Ok(manager) = dxgi_manager() {
+                attrs.SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, &manager)?;
+                _gpu = Some(manager);
+            }
+        } else {
+            attrs.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)?;
+        }
 
         let url = HSTRING::from(path.as_os_str());
         let reader = MFCreateSourceReaderFromURL(PCWSTR(url.as_ptr()), &attrs)
@@ -42,6 +77,9 @@ pub fn for_each_frame(
         let want = MFCreateMediaType()?;
         want.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
         want.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)?;
+        if let Some((sw, sh)) = scale_to {
+            want.SetUINT64(&MF_MT_FRAME_SIZE, (sw as u64) << 32 | sh as u64)?;
+        }
         reader
             .SetCurrentMediaType(FIRST_VIDEO, None, &want)
             .context("decoder cannot output RGB32")?;
@@ -55,15 +93,22 @@ pub fn for_each_frame(
             None => (fw, fh),
         };
 
+        let mut any = false;
         loop {
             let mut flags = 0u32;
             let mut ts = 0i64;
             let mut sample: Option<IMFSample> = None;
             reader.ReadSample(FIRST_VIDEO, 0, None, Some(&mut flags), Some(&mut ts), Some(&mut sample))?;
             if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
-                break;
+                if !repeat || !any {
+                    break;
+                }
+                // Rewinding keeps the decoder, which is much faster than reopening the file.
+                reader.SetCurrentPosition(&GUID::zeroed(), &start_position())?;
+                continue;
             }
             let Some(sample) = sample else { continue };
+            any = true;
             let buf = sample.ConvertToContiguousBuffer()?;
 
             let mut rgba = vec![0u8; (w * h * 4) as usize];
@@ -99,6 +144,47 @@ pub fn for_each_frame(
         }
     }
     Ok(())
+}
+
+/// Position 0 in the source reader's default time format (100 ns units).
+fn start_position() -> windows::Win32::System::Com::StructuredStorage::PROPVARIANT {
+    use windows::Win32::System::Com::StructuredStorage::*;
+    let mut pos = PROPVARIANT::default();
+    // SAFETY: plain-data union; VT_I8 with hVal = 0.
+    unsafe {
+        (*pos.Anonymous.Anonymous).vt = windows::Win32::System::Variant::VT_I8;
+        (*pos.Anonymous.Anonymous).Anonymous.hVal = 0;
+    }
+    pos
+}
+
+/// A Media Foundation device manager around a new hardware D3D11 device.
+unsafe fn dxgi_manager() -> Result<IMFDXGIDeviceManager> {
+    use windows::Win32::Foundation::HMODULE;
+    use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+    use windows::Win32::Graphics::Direct3D11::*;
+
+    let mut device: Option<ID3D11Device> = None;
+    D3D11CreateDevice(
+        None,
+        D3D_DRIVER_TYPE_HARDWARE,
+        HMODULE::default(),
+        D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        None,
+        D3D11_SDK_VERSION,
+        Some(&mut device),
+        None,
+        None,
+    )?;
+    let device = device.context("no D3D11 device")?;
+    // Media Foundation uses the device from several threads.
+    let _ = device.cast::<ID3D11Multithread>()?.SetMultithreadProtected(true);
+    let mut token = 0u32;
+    let mut manager: Option<IMFDXGIDeviceManager> = None;
+    MFCreateDXGIDeviceManager(&mut token, &mut manager)?;
+    let manager = manager.context("MFCreateDXGIDeviceManager")?;
+    manager.ResetDevice(&device, token)?;
+    Ok(manager)
 }
 
 /// Bytes per row of a possibly padded RGB32 buffer of `len` bytes holding at least `w`x`h` pixels.

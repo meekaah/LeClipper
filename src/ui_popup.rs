@@ -306,6 +306,7 @@ impl eframe::App for Popup {
                         self.start_drag(ctx);
                     } else if resp.clicked() {
                         self.preview.toggle_pause();
+                        ctx.request_repaint();
                     }
                     ui.vertical_centered(|ui| {
                         ui.weak("Drag the preview to drop the file anywhere · click to pause");

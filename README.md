@@ -42,7 +42,7 @@ Settings live in `%APPDATA%\screen2imgur\config.toml`, and errors are logged to 
 | MP4 decode for GIF/preview | `src/decode.rs` |
 | GIF via gifski | `src/gif.rs` |
 | Drag a file out of the popup (shell OLE drag) | `src/shell_drag.rs` |
-| Looping preview (decoded once, downscaled, memory-capped) | `src/preview.rs` |
+| Looping preview (streamed, decoded and scaled on the GPU) | `src/preview.rs` |
 | Settings / popup windows (egui) | `src/ui_settings.rs`, `src/ui_popup.rs` |
 
 Settings and the popup run as child processes (`screen2imgur.exe settings`, `screen2imgur.exe popup …`), so the tray process stays a plain Win32 message loop.
