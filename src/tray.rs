@@ -17,7 +17,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::capture::{self, Recording, RecordingResult, Region};
 use crate::config::Config;
-use crate::overlay::{self, RecordingUi, WM_APP_SELECTED, WM_APP_STOP};
+use crate::overlay::{self, ArmedUi, RecordingUi, WM_APP_ARM_CANCEL, WM_APP_ARM_START, WM_APP_SELECTED, WM_APP_STOP};
 
 const WM_APP_TRAY: u32 = WM_APP + 10;
 const WM_APP_HOTKEY: u32 = WM_APP + 11;
@@ -29,12 +29,15 @@ const WM_APP_RELOAD: u32 = WM_APP + 14;
 enum State {
     Idle,
     Selecting(HWND),
+    /// Region chosen, waiting for the user to press Record.
+    Armed(ArmedUi),
     Recording { rec: Recording, ui: RecordingUi },
     Stopping,
 }
 
 struct Menus {
     record: MenuItem,
+    reselect: MenuId,
     settings: MenuId,
     folder: MenuId,
     quit: MenuId,
@@ -49,6 +52,8 @@ struct App {
     hotkey: Option<HotKey>,
     state: State,
     settings_open: bool,
+    /// The region last used (or adjusted then cancelled); offered again on the next record.
+    last_region: Option<Region>,
 }
 
 thread_local! {
@@ -116,11 +121,12 @@ pub fn run() -> Result<()> {
 
         let cfg = Config::load();
         let record = MenuItem::new("Record region", true, None);
+        let reselect = MenuItem::new("Select new region", true, None);
         let settings = MenuItem::new("Settings…", true, None);
         let folder = MenuItem::new("Open output folder", true, None);
         let quit = MenuItem::new("Quit", true, None);
         let menu = Menu::new();
-        menu.append_items(&[&record, &PredefinedMenuItem::separator(), &settings, &folder, &PredefinedMenuItem::separator(), &quit])?;
+        menu.append_items(&[&record, &reselect, &PredefinedMenuItem::separator(), &settings, &folder, &PredefinedMenuItem::separator(), &quit])?;
 
         let tray = TrayIconBuilder::new()
             .with_icon(icon(false))
@@ -135,11 +141,12 @@ pub fn run() -> Result<()> {
             hwnd,
             cfg,
             tray,
-            menus: Menus { record, settings: settings.id().clone(), folder: folder.id().clone(), quit: quit.id().clone() },
+            menus: Menus { record, reselect: reselect.id().clone(), settings: settings.id().clone(), folder: folder.id().clone(), quit: quit.id().clone() },
             hotkeys,
             hotkey: None,
             state: State::Idle,
             settings_open: false,
+            last_region: None,
         };
         app.register_hotkey();
         APP.with(|a| *a.borrow_mut() = Some(app));
@@ -172,7 +179,8 @@ fn clean_stale_temp_files() {
 
 unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
-        WM_APP_TRAY | WM_APP_HOTKEY | WM_APP_MENU | WM_APP_SELECTED | WM_APP_STOP | WM_APP_REC_DONE | WM_APP_RELOAD => {
+        WM_APP_TRAY | WM_APP_HOTKEY | WM_APP_MENU | WM_APP_SELECTED | WM_APP_ARM_START | WM_APP_ARM_CANCEL | WM_APP_STOP
+        | WM_APP_REC_DONE | WM_APP_RELOAD => {
             // Take the app out while handling, so re-entrant messages (modal message boxes) don't double-borrow.
             let Some(mut app) = APP.with(|a| a.borrow_mut().take()) else {
                 DEFERRED.with(|d| d.borrow_mut().push((msg, wp, lp)));
@@ -204,13 +212,16 @@ impl App {
             },
             Err(e) => message_box(&format!("Invalid hotkey \"{}\": {e}", self.cfg.hotkey), true),
         }
-        let label = match &self.hotkey {
+        if matches!(self.state, State::Idle) {
+            self.set_record_label();
+        }
+    }
+
+    fn set_record_label(&self) {
+        self.menus.record.set_text(match &self.hotkey {
             Some(_) => format!("Record region\t{}", self.cfg.hotkey),
             None => "Record region".into(),
-        };
-        if matches!(self.state, State::Idle) {
-            self.menus.record.set_text(label);
-        }
+        });
     }
 
     /// Returns true to quit.
@@ -228,6 +239,8 @@ impl App {
                 let id = *unsafe { Box::from_raw(lp.0 as *mut MenuId) };
                 if id == *self.menus.record.id() {
                     self.toggle();
+                } else if id == self.menus.reselect {
+                    self.reselect();
                 } else if id == self.menus.settings {
                     self.open_settings();
                 } else if id == self.menus.folder {
@@ -245,10 +258,12 @@ impl App {
                 if let State::Selecting(_) = self.state {
                     self.state = State::Idle;
                     if let Some(r) = region {
-                        self.start_recording(r);
+                        self.arm(r);
                     }
                 }
             }
+            WM_APP_ARM_START => self.start_armed(),
+            WM_APP_ARM_CANCEL => self.disarm(),
             WM_APP_STOP => self.stop(),
             WM_APP_REC_DONE => {
                 let res = *unsafe { Box::from_raw(lp.0 as *mut Result<RecordingResult>) };
@@ -274,16 +289,70 @@ impl App {
 
     fn toggle(&mut self) {
         match &self.state {
-            State::Idle => match overlay::select_region(self.hwnd) {
-                Ok(h) => self.state = State::Selecting(h),
-                Err(e) => message_box(&format!("Couldn't open the region selector: {e}"), true),
+            State::Idle => match self.last_region.as_ref().and_then(overlay::revalidate) {
+                Some(r) => self.arm(r),
+                None => self.select(),
             },
             State::Selecting(h) => unsafe {
                 // The selector posts a cancelled WM_APP_SELECTED when destroyed.
                 let _ = DestroyWindow(*h);
             },
+            State::Armed(_) => self.start_armed(),
             State::Recording { .. } => self.stop(),
             State::Stopping => {}
+        }
+    }
+
+    fn select(&mut self) {
+        match overlay::select_region(self.hwnd) {
+            Ok(h) => self.state = State::Selecting(h),
+            Err(e) => message_box(&format!("Couldn't open the region selector: {e}"), true),
+        }
+    }
+
+    /// Drops the remembered region and lets the user drag a new one.
+    fn reselect(&mut self) {
+        match self.state {
+            State::Idle => self.select(),
+            State::Armed(_) => {
+                self.disarm();
+                self.select();
+            }
+            _ => {}
+        }
+    }
+
+    fn arm(&mut self, region: Region) {
+        match ArmedUi::show(&region, self.hwnd) {
+            Ok(ui) => {
+                self.state = State::Armed(ui);
+                self.menus.record.set_text(match &self.hotkey {
+                    Some(_) => format!("Start recording\t{}", self.cfg.hotkey),
+                    None => "Start recording".into(),
+                });
+            }
+            Err(e) => message_box(&format!("Couldn't show the region: {e}"), true),
+        }
+    }
+
+    fn disarm(&mut self) {
+        if let State::Armed(ui) = std::mem::replace(&mut self.state, State::Idle) {
+            self.last_region = ui.region().or(self.last_region);
+            ui.close();
+            self.set_record_label();
+        }
+    }
+
+    fn start_armed(&mut self) {
+        let State::Armed(ui) = std::mem::replace(&mut self.state, State::Idle) else {
+            return;
+        };
+        let region = ui.region();
+        self.last_region = region.or(self.last_region);
+        ui.close();
+        self.set_record_label();
+        if let Some(r) = region {
+            self.start_recording(r);
         }
     }
 
@@ -330,10 +399,7 @@ impl App {
                 None => "Stop recording".into(),
             });
         } else {
-            self.menus.record.set_text(match &self.hotkey {
-                Some(_) => format!("Record region\t{}", self.cfg.hotkey),
-                None => "Record region".into(),
-            });
+            self.set_record_label();
         }
     }
 

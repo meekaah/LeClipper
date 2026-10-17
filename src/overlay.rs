@@ -1,4 +1,5 @@
-//! Win32 overlay windows: region selector, recording border and the floating stop bar.
+//! Win32 overlay windows: region selector, the adjustable region shown before recording,
+//! the recording border and the floating stop bar.
 //! All of them live on the tray thread and report back by posting messages to `notify`.
 
 use std::sync::Once;
@@ -8,8 +9,10 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, SetFocus, VK_ESCAPE, VK_RETURN};
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_ESCAPE, VK_RETURN,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::capture::Region;
@@ -204,27 +207,73 @@ unsafe fn finish_select(hwnd: HWND, st: &mut Selector, region: Option<Region>) {
 }
 
 /// Turns a client-space rectangle into a capture region on `mon`.
-fn make_region(st: &Selector, mon_handle: HMONITOR, mon: RECT, mut r: RECT) -> Region {
+fn make_region(st: &Selector, mon_handle: HMONITOR, mut mon: RECT, mut r: RECT) -> Region {
     // A click (or tiny drag) selects the whole monitor.
     if r.right - r.left < 8 && r.bottom - r.top < 8 {
         r = mon;
     }
+    unsafe {
+        let _ = OffsetRect(&mut r, st.vx, st.vy);
+        let _ = OffsetRect(&mut mon, st.vx, st.vy);
+    }
+    fit_region(mon_handle, mon, r)
+}
+
+const MIN_SIZE: i32 = 64;
+
+/// Clamps a screen-space rectangle into monitor `mon` and makes it a valid capture region.
+fn fit_region(mon_handle: HMONITOR, mon: RECT, r: RECT) -> Region {
     // H.264 needs even dimensions; keep a sane minimum.
-    let min = 64;
-    let mut w = (r.right - r.left).max(min).min(mon.right - mon.left);
-    let mut h = (r.bottom - r.top).max(min).min(mon.bottom - mon.top);
+    let mut w = (r.right - r.left).max(MIN_SIZE).min(mon.right - mon.left);
+    let mut h = (r.bottom - r.top).max(MIN_SIZE).min(mon.bottom - mon.top);
     w &= !1;
     h &= !1;
     let x = r.left.min(mon.right - w).max(mon.left);
     let y = r.top.min(mon.bottom - h).max(mon.top);
-    Region {
-        monitor: mon_handle.0 as isize,
-        x: x + st.vx,
-        y: y + st.vy,
-        w: w as u32,
-        h: h as u32,
-        mon_x: mon.left + st.vx,
-        mon_y: mon.top + st.vy,
+    Region { monitor: mon_handle.0 as isize, x, y, w: w as u32, h: h as u32, mon_x: mon.left, mon_y: mon.top }
+}
+
+/// The monitor `r` is (mostly) on, as (handle, monitor rect).
+fn monitor_of(r: &RECT, flags: MONITOR_FROM_FLAGS) -> Option<(HMONITOR, RECT)> {
+    unsafe {
+        let mon = MonitorFromRect(r, flags);
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        (!mon.is_invalid() && GetMonitorInfoW(mon, &mut mi).as_bool()).then_some((mon, mi.rcMonitor))
+    }
+}
+
+/// Re-checks a previously used region against the current monitor layout: `None` if it is no
+/// longer entirely on one monitor, else the region with fresh monitor info.
+pub fn revalidate(region: &Region) -> Option<Region> {
+    let r = region_rect(region);
+    let (mon, mr) = monitor_of(&r, MONITOR_DEFAULTTONULL)?;
+    let inside = r.left >= mr.left && r.top >= mr.top && r.right <= mr.right && r.bottom <= mr.bottom;
+    inside.then(|| fit_region(mon, mr, r))
+}
+
+fn region_rect(r: &Region) -> RECT {
+    RECT { left: r.x, top: r.y, right: r.x + r.w as i32, bottom: r.y + r.h as i32 }
+}
+
+/// Where a toolbar of `bw`×`bh` goes for region `r`: below it if it fits, else above,
+/// else inside the top-right corner. `margin` is how far the frame extends outside `r`.
+fn bar_pos(r: RECT, margin: i32, bw: i32, bh: i32, scale: f32) -> (i32, i32) {
+    unsafe {
+        let mon = MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let _ = GetMonitorInfoW(mon, &mut mi);
+        let work = mi.rcWork;
+        let gap = (6.0 * scale) as i32;
+        let bottom = r.bottom + margin;
+        let x = (r.right - bw).clamp(work.left, (work.right - bw).max(work.left));
+        let y = if bottom + gap + bh <= work.bottom {
+            bottom + gap
+        } else if r.top - margin - gap - bh >= work.top {
+            r.top - margin - gap - bh
+        } else {
+            r.top + gap
+        };
+        (x, y)
     }
 }
 
@@ -441,21 +490,7 @@ impl RecordingUi {
             let scale = dpi as f32 / 96.0;
             let (bw, bh) = ((168.0 * scale) as i32, (34.0 * scale) as i32);
 
-            // Below the region if it fits, else above, else inside the top-right corner.
-            let mon = MonitorFromPoint(POINT { x: region.x, y: region.y }, MONITOR_DEFAULTTONEAREST);
-            let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
-            let _ = GetMonitorInfoW(mon, &mut mi);
-            let work = mi.rcWork;
-            let gap = (6.0 * scale) as i32;
-            let bottom = region.y + region.h as i32 + BORDER;
-            let x = (region.x + region.w as i32 - bw).clamp(work.left, (work.right - bw).max(work.left));
-            let y = if bottom + gap + bh <= work.bottom {
-                bottom + gap
-            } else if region.y - BORDER - gap - bh >= work.top {
-                region.y - BORDER - gap - bh
-            } else {
-                region.y + gap
-            };
+            let (x, y) = bar_pos(region_rect(region), BORDER, bw, bh, scale);
             let st = Box::new(Bar {
                 notify,
                 started: Instant::now(),
@@ -598,6 +633,494 @@ unsafe extern "system" fn bar_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             let _ = KillTimer(Some(hwnd), 1);
             let _ = DeleteObject(st.font.into());
             free_state::<Bar>(hwnd);
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+// ───────────────────────────── Armed region (before recording) ─────────────────────────────
+
+/// Posted by the armed toolbar's Record / cancel buttons.
+pub const WM_APP_ARM_START: u32 = WM_APP + 3;
+pub const WM_APP_ARM_CANCEL: u32 = WM_APP + 4;
+
+/// Premultiplied BGRA.
+const PX_GREEN: u32 = 0xFF00_C853;
+const PX_WHITE: u32 = 0xFFFF_FFFF;
+/// Alpha 1: invisible, but still receives the mouse (alpha 0 clicks through).
+const PX_GRAB: u32 = 0x0100_0000;
+
+const EDGE_L: u8 = 1;
+const EDGE_T: u8 = 2;
+const EDGE_R: u8 = 4;
+const EDGE_B: u8 = 8;
+
+/// The green frame. Its window covers the region plus an invisible `grip` band for resizing.
+struct Frame {
+    inner: RECT,
+    grip: i32,
+    scale: f32,
+    bar: HWND,
+    bar_size: (i32, i32),
+    /// Edges being dragged (`EDGE_*`), cursor and region at drag start.
+    drag: Option<(u8, POINT, RECT)>,
+}
+
+struct ArmedBar {
+    notify: HWND,
+    frame: HWND,
+    scale: f32,
+    font: HFONT,
+    record_rect: RECT,
+    cancel_rect: RECT,
+    /// 0 = none, 1 = Record, 2 = cancel.
+    hover: u8,
+    /// Last cursor position while dragging the grip.
+    drag: Option<POINT>,
+}
+
+/// The selected region waiting for the user to press Record; it can be moved and resized.
+pub struct ArmedUi {
+    frame: HWND,
+    bar: HWND,
+}
+
+impl ArmedUi {
+    pub fn show(region: &Region, notify: HWND) -> windows::core::Result<Self> {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            register(w!("s2i_frame"), Some(frame_proc), IDC_ARROW);
+            register(w!("s2i_armbar"), Some(armbar_proc), IDC_ARROW);
+        });
+        unsafe {
+            let (mut dx, mut dy) = (96, 96);
+            let _ = GetDpiForMonitor(HMONITOR(region.monitor as _), MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
+            let scale = dx.max(96) as f32 / 96.0;
+
+            let frame = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE,
+                w!("s2i_frame"),
+                w!("screen2imgur region"),
+                WS_POPUP,
+                0, 0, 1, 1,
+                None, None, Some(hinstance()), None,
+            )?;
+            let bar = match CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                w!("s2i_armbar"),
+                w!("screen2imgur ready"),
+                WS_POPUP,
+                0, 0, 10, 10,
+                None, None, Some(hinstance()), None,
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    let _ = DestroyWindow(frame);
+                    return Err(e);
+                }
+            };
+
+            let (bw, bh) = ((236.0 * scale) as i32, (34.0 * scale) as i32);
+            let pad = (5.0 * scale) as i32;
+            let cancel_rect = RECT { left: bw - pad - (28.0 * scale) as i32, top: pad, right: bw - pad, bottom: bh - pad };
+            let record_rect = RECT { left: cancel_rect.left - pad - (84.0 * scale) as i32, top: pad, right: cancel_rect.left - pad, bottom: bh - pad };
+            let bst = Box::new(ArmedBar {
+                notify,
+                frame,
+                scale,
+                font: ui_font((14.0 * scale) as i32, true),
+                record_rect,
+                cancel_rect,
+                hover: 0,
+                drag: None,
+            });
+            SetWindowLongPtrW(bar, GWLP_USERDATA, Box::into_raw(bst) as isize);
+            let _ = SetWindowPos(bar, Some(HWND_TOPMOST), 0, 0, bw, bh, SWP_NOACTIVATE);
+
+            let fst = Box::new(Frame {
+                inner: region_rect(region),
+                grip: (8.0 * scale) as i32,
+                scale,
+                bar,
+                bar_size: (bw, bh),
+                drag: None,
+            });
+            SetWindowLongPtrW(frame, GWLP_USERDATA, Box::into_raw(fst) as isize);
+            if let Some(st) = state::<Frame>(frame) {
+                update_frame(frame, st);
+            }
+
+            exclude_from_capture(frame);
+            exclude_from_capture(bar);
+            let _ = ShowWindow(frame, SW_SHOWNOACTIVATE);
+            let _ = ShowWindow(bar, SW_SHOWNOACTIVATE);
+            Ok(Self { frame, bar })
+        }
+    }
+
+    /// The region as currently placed, fitted into the monitor it is (mostly) on.
+    pub fn region(&self) -> Option<Region> {
+        unsafe {
+            let st = state::<Frame>(self.frame)?;
+            let (mon, mr) = monitor_of(&st.inner, MONITOR_DEFAULTTONEAREST)?;
+            Some(fit_region(mon, mr, st.inner))
+        }
+    }
+
+    pub fn close(self) {
+        unsafe {
+            let _ = DestroyWindow(self.bar);
+            let _ = DestroyWindow(self.frame);
+        }
+    }
+}
+
+fn fill(px: &mut [u32], w: i32, h: i32, r: RECT, c: u32) {
+    let (l, rt) = (r.left.max(0), r.right.min(w));
+    if l >= rt {
+        return;
+    }
+    for y in r.top.max(0)..r.bottom.min(h) {
+        let row = (y * w) as usize;
+        px[row + l as usize..row + rt as usize].fill(c);
+    }
+}
+
+/// Redraws the frame at `st.inner` and moves the toolbar along with it.
+unsafe fn update_frame(hwnd: HWND, st: &Frame) {
+    let g = st.grip;
+    let inner = st.inner;
+    let (w, h) = (inner.right - inner.left + 2 * g, inner.bottom - inner.top + 2 * g);
+    let screen = GetDC(None);
+    let mem = CreateCompatibleDC(Some(screen));
+    let bi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: w,
+            biHeight: -h,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut bits = std::ptr::null_mut();
+    if let Ok(dib) = CreateDIBSection(Some(mem), &bi, DIB_RGB_COLORS, &mut bits, None, 0) {
+        let px = std::slice::from_raw_parts_mut(bits as *mut u32, (w * h) as usize);
+        let r = |left, top, right, bottom| RECT { left, top, right, bottom };
+        for band in [r(0, 0, w, g), r(0, h - g, w, h), r(0, g, g, h - g), r(w - g, g, w, h - g)] {
+            fill(px, w, h, band, PX_GRAB);
+        }
+        let b = BORDER;
+        for line in [r(g - b, g - b, w - g + b, g), r(g - b, h - g, w - g + b, h - g + b), r(g - b, g, g, h - g), r(w - g, g, w - g + b, h - g)] {
+            fill(px, w, h, line, PX_GREEN);
+        }
+        // Handles on the corners and edge midpoints of the outline.
+        let hs = (3.0 * st.scale) as i32 + 1;
+        for (i, x) in [g - b / 2, w / 2, w - g + b / 2].into_iter().enumerate() {
+            for (j, y) in [g - b / 2, h / 2, h - g + b / 2].into_iter().enumerate() {
+                if i == 1 && j == 1 {
+                    continue;
+                }
+                fill(px, w, h, r(x - hs - 1, y - hs - 1, x + hs + 1, y + hs + 1), PX_GREEN);
+                fill(px, w, h, r(x - hs, y - hs, x + hs, y + hs), PX_WHITE);
+            }
+        }
+        let old = SelectObject(mem, dib.into());
+        let pos = POINT { x: inner.left - g, y: inner.top - g };
+        let size = SIZE { cx: w, cy: h };
+        let src = POINT::default();
+        let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
+        let _ = UpdateLayeredWindow(hwnd, Some(screen), Some(&pos), Some(&size), Some(mem), Some(&src), COLORREF(0), Some(&blend), ULW_ALPHA);
+        SelectObject(mem, old);
+        let _ = DeleteObject(dib.into());
+    }
+    let _ = DeleteDC(mem);
+    ReleaseDC(None, screen);
+
+    let (bw, bh) = st.bar_size;
+    let (x, y) = bar_pos(inner, g, bw, bh, st.scale);
+    let _ = SetWindowPos(st.bar, Some(HWND_TOPMOST), x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+    let _ = InvalidateRect(Some(st.bar), None, false);
+}
+
+/// Which edges a point in frame-window coordinates grabs.
+fn edges_at(p: POINT, st: &Frame) -> u8 {
+    let g = st.grip;
+    let (w, h) = (st.inner.right - st.inner.left + 2 * g, st.inner.bottom - st.inner.top + 2 * g);
+    let corner = g * 3;
+    let mut e = 0;
+    if p.x < g {
+        e |= EDGE_L;
+    }
+    if p.x >= w - g {
+        e |= EDGE_R;
+    }
+    if p.y < g {
+        e |= EDGE_T;
+    }
+    if p.y >= h - g {
+        e |= EDGE_B;
+    }
+    // Generous corners: near a corner along an edge grabs both edges.
+    if e & (EDGE_T | EDGE_B) != 0 {
+        if p.x < corner {
+            e |= EDGE_L;
+        } else if p.x >= w - corner {
+            e |= EDGE_R;
+        }
+    }
+    if e & (EDGE_L | EDGE_R) != 0 {
+        if p.y < corner {
+            e |= EDGE_T;
+        } else if p.y >= h - corner {
+            e |= EDGE_B;
+        }
+    }
+    e
+}
+
+fn edge_cursor(e: u8) -> PCWSTR {
+    const LT: u8 = EDGE_L | EDGE_T;
+    const RB: u8 = EDGE_R | EDGE_B;
+    const RT: u8 = EDGE_R | EDGE_T;
+    const LB: u8 = EDGE_L | EDGE_B;
+    match e {
+        LT | RB => IDC_SIZENWSE,
+        RT | LB => IDC_SIZENESW,
+        EDGE_L | EDGE_R => IDC_SIZEWE,
+        EDGE_T | EDGE_B => IDC_SIZENS,
+        _ => IDC_ARROW,
+    }
+}
+
+fn set_cursor(c: PCWSTR) {
+    unsafe {
+        if let Ok(h) = LoadCursorW(None, c) {
+            SetCursor(Some(h));
+        }
+    }
+}
+
+fn cursor_pos() -> POINT {
+    let mut p = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut p);
+    }
+    p
+}
+
+unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    let Some(st) = state::<Frame>(hwnd) else {
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    };
+    match msg {
+        WM_SETCURSOR => {
+            let mut p = cursor_pos();
+            let _ = ScreenToClient(hwnd, &mut p);
+            set_cursor(edge_cursor(edges_at(p, st)));
+            LRESULT(1)
+        }
+        WM_LBUTTONDOWN => {
+            let e = edges_at(mouse_pt(lp), st);
+            if e != 0 {
+                st.drag = Some((e, cursor_pos(), st.inner));
+                SetCapture(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            if let Some((e, start, r0)) = st.drag {
+                let p = cursor_pos();
+                let (dx, dy) = (p.x - start.x, p.y - start.y);
+                let mut r = r0;
+                if e & EDGE_L != 0 {
+                    r.left = (r0.left + dx).min(r0.right - MIN_SIZE);
+                }
+                if e & EDGE_R != 0 {
+                    r.right = (r0.right + dx).max(r0.left + MIN_SIZE);
+                }
+                if e & EDGE_T != 0 {
+                    r.top = (r0.top + dy).min(r0.bottom - MIN_SIZE);
+                }
+                if e & EDGE_B != 0 {
+                    r.bottom = (r0.bottom + dy).max(r0.top + MIN_SIZE);
+                }
+                if r != st.inner {
+                    st.inner = r;
+                    update_frame(hwnd, st);
+                }
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            st.drag = None;
+            let _ = ReleaseCapture();
+            LRESULT(0)
+        }
+        WM_CAPTURECHANGED => {
+            st.drag = None;
+            LRESULT(0)
+        }
+        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        WM_DESTROY => {
+            free_state::<Frame>(hwnd);
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+impl ArmedBar {
+    fn hit(&self, p: POINT) -> u8 {
+        unsafe {
+            if PtInRect(&self.record_rect, p).as_bool() {
+                1
+            } else if PtInRect(&self.cancel_rect, p).as_bool() {
+                2
+            } else {
+                0
+            }
+        }
+    }
+}
+
+unsafe extern "system" fn armbar_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    let Some(st) = state::<ArmedBar>(hwnd) else {
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    };
+    match msg {
+        WM_SETCURSOR => {
+            let mut p = cursor_pos();
+            let _ = ScreenToClient(hwnd, &mut p);
+            set_cursor(if st.hit(p) == 0 { IDC_SIZEALL } else { IDC_HAND });
+            LRESULT(1)
+        }
+        WM_LBUTTONDOWN => {
+            if st.hit(mouse_pt(lp)) == 0 {
+                st.drag = Some(cursor_pos());
+                SetCapture(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            if let Some(last) = st.drag {
+                // Dragging the bar moves the whole region; the frame then repositions the bar.
+                let p = cursor_pos();
+                if p != last {
+                    st.drag = Some(p);
+                    if let Some(f) = state::<Frame>(st.frame) {
+                        let _ = OffsetRect(&mut f.inner, p.x - last.x, p.y - last.y);
+                        update_frame(st.frame, f);
+                    }
+                }
+            } else {
+                let hover = st.hit(mouse_pt(lp));
+                if hover != st.hover {
+                    st.hover = hover;
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+                let mut tme = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                let _ = TrackMouseEvent(&mut tme);
+            }
+            LRESULT(0)
+        }
+        WM_MOUSELEAVE => {
+            if st.hover != 0 {
+                st.hover = 0;
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            if st.drag.take().is_some() {
+                let _ = ReleaseCapture();
+            } else {
+                let msg = match st.hit(mouse_pt(lp)) {
+                    1 => WM_APP_ARM_START,
+                    2 => WM_APP_ARM_CANCEL,
+                    _ => 0,
+                };
+                if msg != 0 {
+                    let _ = PostMessageW(Some(st.notify), msg, WPARAM(0), LPARAM(0));
+                }
+            }
+            LRESULT(0)
+        }
+        WM_CAPTURECHANGED => {
+            st.drag = None;
+            LRESULT(0)
+        }
+        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        WM_ERASEBKGND => LRESULT(1),
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut rc = RECT::default();
+            let _ = GetClientRect(hwnd, &mut rc);
+            let back = CreateCompatibleDC(Some(hdc));
+            let bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+            let old = SelectObject(back, bmp.into());
+
+            let bg = CreateSolidBrush(rgb(28, 28, 30));
+            FillRect(back, &rc, bg);
+            let _ = DeleteObject(bg.into());
+
+            let s = st.scale;
+            // Grip dots (2 × 3) to show the bar can be dragged.
+            let dot = CreateSolidBrush(rgb(130, 130, 136));
+            let d = ((2.0 * s) as i32).max(2);
+            for i in 0..2 {
+                for j in 0..3 {
+                    let x = (10.0 * s) as i32 + i * d * 2;
+                    let y = rc.bottom / 2 - d * 5 / 2 + j * d * 2;
+                    FillRect(back, &RECT { left: x, top: y, right: x + d, bottom: y + d }, dot);
+                }
+            }
+            let _ = DeleteObject(dot.into());
+
+            SetBkMode(back, TRANSPARENT);
+            SelectObject(back, st.font.into());
+            SetTextColor(back, rgb(240, 240, 240));
+            if let Some(f) = state::<Frame>(st.frame) {
+                let (w, h) = ((f.inner.right - f.inner.left) & !1, (f.inner.bottom - f.inner.top) & !1);
+                let mut tr = RECT { left: (24.0 * s) as i32, top: 0, right: st.record_rect.left, bottom: rc.bottom };
+                let mut t = wide(&format!("{w} × {h}"));
+                DrawTextW(back, &mut t, &mut tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            }
+
+            let btn = CreateSolidBrush(if st.hover == 1 { rgb(20, 190, 90) } else { rgb(16, 160, 72) });
+            FillRect(back, &st.record_rect, btn);
+            let _ = DeleteObject(btn.into());
+            SetTextColor(back, rgb(255, 255, 255));
+            let mut br = st.record_rect;
+            let mut rec = wide("● Record");
+            DrawTextW(back, &mut rec, &mut br, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+            let btn = CreateSolidBrush(if st.hover == 2 { rgb(70, 70, 76) } else { rgb(48, 48, 52) });
+            FillRect(back, &st.cancel_rect, btn);
+            let _ = DeleteObject(btn.into());
+            let mut cr = st.cancel_rect;
+            let mut x = wide("✕");
+            DrawTextW(back, &mut x, &mut cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+            let _ = BitBlt(hdc, 0, 0, rc.right, rc.bottom, Some(back), 0, 0, SRCCOPY);
+            SelectObject(back, old);
+            let _ = DeleteObject(bmp.into());
+            let _ = DeleteDC(back);
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        WM_DESTROY => {
+            let _ = DeleteObject(st.font.into());
+            free_state::<ArmedBar>(hwnd);
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
