@@ -266,7 +266,15 @@ impl SettingsApp {
             ui.add_space(16.0);
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
-                ui.label(RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).size(12.0).color(WEAK));
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.label(RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).size(12.0).color(WEAK));
+                    let mut signature = egui::text::LayoutJob::default();
+                    for text in [RichText::new("by ").italics(), RichText::new(" MeeKaaH")] {
+                        text.size(11.0).color(WEAK).append_to(&mut signature, ui.style(), egui::FontSelection::Default, Align::Center);
+                    }
+                    ui.label(signature);
+                });
             });
         });
     }
