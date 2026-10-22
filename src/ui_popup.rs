@@ -69,6 +69,7 @@ const ICON_WARNING: &str = "\u{E7BA}";
 const ICON_CHECK: &str = "\u{E73E}";
 const ICON_ERROR: &str = "\u{E783}";
 const ICON_INFO: &str = "\u{E946}";
+const ICON_SETTINGS: &str = "\u{E713}";
 
 /// How long the Copy button says "Copied" after a copy.
 const COPIED_TIME: Duration = Duration::from_secs(2);
@@ -77,13 +78,16 @@ const MIN_PREVIEW_H: f32 = 140.0;
 const WINDOW_W: f32 = 660.0;
 /// The panel's horizontal and vertical inner margins.
 const MARGIN: (i8, i8) = (18, 14);
+/// Less than the bottom margin: the title row has some air of its own.
+const MARGIN_TOP: i8 = 8;
 /// The trimmed clip is never shorter than this, in seconds.
 const MIN_TRIM: f64 = 0.1;
 /// After the end knob moves, playback picks up this long before the end, to show the cut.
 const END_LEAD_IN: f64 = 1.5;
 /// Height of the trim bar, and the space above it.
 const TRIM_H: f32 = 28.0;
-const TRIM_GAP: f32 = 10.0;
+// Room for the hint pill hanging half below the preview (plus item spacing, it clears the knobs).
+const TRIM_GAP: f32 = 12.0;
 
 pub fn run(args: Args) -> Result<()> {
     if !args.path.exists() {
@@ -98,7 +102,7 @@ pub fn run(args: Args) -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("LeClipper — recording")
-            .with_inner_size([WINDOW_W, preview_h.max(MIN_PREVIEW_H) + 147.0 + TRIM_GAP + TRIM_H])
+            .with_inner_size([WINDOW_W, preview_h.max(MIN_PREVIEW_H) + 133.0 + TRIM_GAP + TRIM_H])
             .with_min_inner_size([440.0, 260.0])
             .with_always_on_top()
             .with_active(true)
@@ -537,7 +541,7 @@ impl Popup {
                 chip(ui, &format!("{}×{}", self.args.width, self.args.height));
             });
         });
-        ui.add_space(12.0);
+        ui.add_space(4.0);
     }
 
     fn preview_ui(&mut self, ui: &mut Ui, ctx: &egui::Context, max_h: f32) {
@@ -582,8 +586,8 @@ impl Popup {
         };
         p.rect_stroke(card, 12, Stroke::new(1.0, BORDER), StrokeKind::Inside);
 
-        let cursor = if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab };
-        let resp = resp.on_hover_cursor(cursor);
+        // Grab/Grabbing are the four-arrows cursor on Windows; the link hand reads better.
+        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
         if resp.drag_started() {
             self.start_drag(ctx);
         } else if resp.clicked() && has_frame {
@@ -622,7 +626,7 @@ impl Popup {
             ui.selectable_value(&mut self.drag_format, DragFormat::Gif, "Drag GIF");
         });
 
-        // Hint along the bottom edge. Painted only, so clicks and drags reach the preview.
+        // Hint straddling the bottom edge. Painted only, so clicks and drags reach the preview.
         if has_frame {
             let hint = p.layout_no_wrap(
                 "Drag preview to drop file anywhere  •  Click to pause".to_owned(),
@@ -631,10 +635,18 @@ impl Popup {
             );
             let size = vec2(hint.size().x + 32.0, 32.0);
             if size.x + 20.0 <= card.width() {
-                let rect = Rect::from_center_size(Pos2::new(card.center().x, card.bottom() - 12.0 - size.y / 2.0), size);
-                p.rect(rect, 16, Color32::from_black_alpha(185), Stroke::new(1.0, Color32::from_white_alpha(28)), StrokeKind::Inside);
+                let rect = Rect::from_center_size(Pos2::new(card.center().x, card.bottom()), size);
+                p.rect_filled(rect, 16, CANVAS);
+                // Border on the top half only, where it sits over the video.
+                let top = Rect::from_min_max(rect.min - vec2(1.0, 1.0), Pos2::new(rect.right() + 1.0, rect.center().y));
+                p.with_clip_rect(top.intersect(p.clip_rect())).rect_stroke(
+                    rect,
+                    16,
+                    Stroke::new(1.0, Color32::from_white_alpha(28)),
+                    StrokeKind::Inside,
+                );
                 // Up a little so the descenders (g, p, y) don't make the line look low.
-                p.galley(centered_galley_pos(&hint, rect.center() - vec2(0.0, 2.0)), hint, Color32::from_white_alpha(240));
+                p.galley(centered_galley_pos(&hint, rect.center() - vec2(0.0, 2.0)), hint, Color32::from_gray(190));
             }
         }
     }
@@ -766,16 +778,17 @@ impl Popup {
         let mp4_icon = if self.saved_with_ext("mp4").is_some() { ICON_CHECK } else { ICON_SAVE };
         let gif_icon = if self.saved_with_ext("gif").is_some() { ICON_CHECK } else { ICON_PICTURE };
 
-        // Upload takes half the row, each save a quarter.
+        // Four buttons of equal width; the last one takes the rounding leftover.
         let gap = ui.spacing().item_spacing.x;
-        let quarter = ((ui.available_width() - gap * 2.0) / 4.0).floor();
-        let half = ui.available_width() - gap * 2.0 - quarter * 2.0;
-        let fits = button_width(ui, mp4_icon, "Save MP4", Kind::Secondary, 34.0) <= quarter;
-        let (mp4, gif) = if fits { ("Save MP4", "Save GIF") } else { ("MP4", "GIF") };
+        let quarter = ((ui.available_width() - gap * 3.0) / 4.0).floor();
+        let last = ui.available_width() - gap * 3.0 - quarter * 3.0;
+        let fits = |icon: &str, text: &str, kind: Kind| button_width(ui, icon, text, kind, 34.0) <= quarter;
+        let up_text = if up_text == "Upload to Imgur" && !fits(up_icon, up_text, Kind::Primary) { "Upload" } else { up_text };
+        let (mp4, gif) = if fits(mp4_icon, "Save MP4", Kind::Secondary) { ("Save MP4", "Save GIF") } else { ("MP4", "GIF") };
 
         ui.horizontal(|ui| {
             let can_upload = self.upload.is_none() && self.link.is_none() && self.after_cut != Some(AfterCut::Upload);
-            if button_with(ui, up_icon, up_text, Kind::Primary, can_upload, 34.0, Some(half)).clicked() {
+            if button_with(ui, up_icon, up_text, Kind::Primary, can_upload, 34.0, Some(quarter)).clicked() {
                 self.start_upload(ctx);
             }
             if button_with(ui, mp4_icon, mp4, Kind::Secondary, !busy, 34.0, Some(quarter)).clicked() {
@@ -783,6 +796,9 @@ impl Popup {
             }
             if button_with(ui, gif_icon, gif, Kind::Secondary, !busy, 34.0, Some(quarter)).clicked() {
                 self.save_gif(ctx, true);
+            }
+            if button_with(ui, ICON_SETTINGS, "Settings", Kind::Secondary, true, 34.0, Some(last)).clicked() {
+                crate::tray::request_settings(self.hwnd);
             }
         });
     }
@@ -992,9 +1008,10 @@ impl eframe::App for Popup {
             (v.inner_rect, v.maximized.unwrap_or(false), v.monitor_size.map_or(1080.0, |s| s.y))
         });
         let max_h = monitor_h - 120.0;
-        let margin_y = 2.0 * MARGIN.1 as f32;
+        let margin_y = (MARGIN_TOP + MARGIN.1) as f32;
 
-        let panel_frame = egui::Frame::new().fill(CANVAS).inner_margin(Margin::symmetric(MARGIN.0, MARGIN.1));
+        let margin = Margin { top: MARGIN_TOP, ..Margin::symmetric(MARGIN.0, MARGIN.1) };
+        let panel_frame = egui::Frame::new().fill(CANVAS).inner_margin(margin);
         egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
             let start = ui.cursor().top();
             self.header_ui(ui);

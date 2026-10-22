@@ -26,6 +26,9 @@ const WM_APP_MENU: u32 = WM_APP + 12;
 /// lParam = `Box<Result<RecordingResult>>`.
 const WM_APP_REC_DONE: u32 = WM_APP + 13;
 const WM_APP_RELOAD: u32 = WM_APP + 14;
+/// Posted by a popup's Settings button.
+const WM_APP_OPEN_SETTINGS: u32 = WM_APP + 15;
+const MAIN_CLASS: PCWSTR = w!("lc_main");
 
 enum State {
     Idle,
@@ -95,7 +98,7 @@ pub fn run() -> Result<()> {
 
         clean_stale_temp_files();
 
-        let class = w!("lc_main");
+        let class = MAIN_CLASS;
         let wc = WNDCLASSW {
             lpfnWndProc: Some(main_proc),
             lpszClassName: class,
@@ -185,10 +188,38 @@ fn clean_stale_temp_files() {
     }
 }
 
+/// Called from a popup process. Settings goes through the tray so there's only ever one
+/// window and the tray reloads the config when it closes. `popup` is the caller's window.
+pub fn request_settings(popup: Option<isize>) {
+    unsafe {
+        // The popup is always on top, which would keep settings under it. Done here rather than
+        // with a viewport command, which would run after this and raise the popup again.
+        if let Some(h) = popup {
+            let _ = SetWindowPos(HWND(h as _), Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+        // An open settings window is just brought forward; we have the foreground, the tray doesn't.
+        if let Ok(win) = FindWindowW(None, w!("LeClipper settings")) {
+            if IsIconic(win).as_bool() {
+                let _ = ShowWindow(win, SW_RESTORE);
+            }
+            let _ = SetForegroundWindow(win);
+            return;
+        }
+        match FindWindowExW(Some(HWND_MESSAGE), None, MAIN_CLASS, None) {
+            // Let the settings process the tray starts take the foreground from us.
+            Ok(tray) => {
+                let _ = AllowSetForegroundWindow(ASFW_ANY);
+                let _ = PostMessageW(Some(tray), WM_APP_OPEN_SETTINGS, WPARAM(0), LPARAM(0));
+            }
+            Err(_) => message_box("LeClipper isn't running, so settings can't be opened from here.", true),
+        }
+    }
+}
+
 unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_APP_TRAY | WM_APP_HOTKEY | WM_APP_MENU | WM_APP_SELECTED | WM_APP_ARM_START | WM_APP_ARM_CANCEL | WM_APP_STOP
-        | WM_APP_REC_DONE | WM_APP_RELOAD => {
+        | WM_APP_REC_DONE | WM_APP_RELOAD | WM_APP_OPEN_SETTINGS => {
             // Take the app out while handling, so re-entrant messages (modal message boxes) don't double-borrow.
             let Some(mut app) = APP.with(|a| a.borrow_mut().take()) else {
                 DEFERRED.with(|d| d.borrow_mut().push((msg, wp, lp)));
@@ -292,6 +323,7 @@ impl App {
                 self.cfg = Config::load();
                 self.register_hotkey();
             }
+            WM_APP_OPEN_SETTINGS => self.open_settings(),
             _ => {}
         }
         false
