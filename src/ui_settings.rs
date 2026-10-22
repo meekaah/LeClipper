@@ -59,7 +59,6 @@ const ICON_KEYBOARD: &str = "\u{E765}";
 const ICON_RECORD: &str = "\u{E7C8}";
 const ICON_FOLDER: &str = "\u{E8B7}";
 const ICON_PICTURE: &str = "\u{E8B9}";
-const ICON_ACCOUNT: &str = "\u{E77B}";
 const ICON_CHECK: &str = "\u{E73E}";
 const ICON_ERROR: &str = "\u{E783}";
 const ICON_MINUS: &str = "\u{E738}";
@@ -97,6 +96,7 @@ struct SettingsApp {
     last_change: Instant,
     tab: Tab,
     logo: egui::TextureHandle,
+    imgur_logo: egui::TextureHandle,
     listening: bool,
     hotkey_reject: Option<String>,
     toast: Option<(String, bool, Instant)>,
@@ -118,6 +118,12 @@ impl SettingsApp {
             egui::ColorImage::from_rgba_unmultiplied([size, size], &crate::icon::rgba(false)),
             Default::default(),
         );
+        let side = crate::icon::IMGUR_SIZE;
+        let imgur_logo = cc.egui_ctx.load_texture(
+            "imgur-logo",
+            egui::ColorImage::from_rgba_unmultiplied([side, side], crate::icon::IMGUR_RGBA),
+            Default::default(),
+        );
         let cfg = Config::load();
         let mut app = Self {
             saved: cfg.clone(),
@@ -126,6 +132,7 @@ impl SettingsApp {
             last_change: Instant::now(),
             tab: Tab::General,
             logo,
+            imgur_logo,
             listening: false,
             hotkey_reject: None,
             toast: None,
@@ -363,7 +370,8 @@ impl SettingsApp {
         page_header(ui, "Integrations", "Connected services and sessions.");
         let ctx = ui.ctx().clone();
 
-        card(ui, ICON_ACCOUNT, "Imgur", |ui| {
+        let imgur_logo = self.imgur_logo.clone();
+        image_card(ui, &imgur_logo, "Imgur", |ui| {
             let op = self.imgur.as_ref().map(|(op, ..)| *op);
             let checking = op == Some(ImgurOp::Check);
             let (dot, title, sub) = match self.auth {
@@ -728,6 +736,20 @@ fn page_header(ui: &mut Ui, title: &str, subtitle: &str) {
 }
 
 fn card(ui: &mut Ui, icon: &str, title: &str, body: impl FnOnce(&mut Ui)) {
+    card_with(ui, title, body, |ui, rect| {
+        ui.painter().rect_filled(rect, 7, ACCENT.gamma_multiply(0.16));
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, icon, FontId::new(14.0, icons()), ACCENT);
+    });
+}
+
+/// A card whose header shows a full-colour image instead of a tinted glyph.
+fn image_card(ui: &mut Ui, image: &egui::TextureHandle, title: &str, body: impl FnOnce(&mut Ui)) {
+    card_with(ui, title, body, |ui, rect| {
+        egui::Image::new(image).corner_radius(7).paint_at(ui, rect);
+    });
+}
+
+fn card_with(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui), icon: impl FnOnce(&Ui, Rect)) {
     egui::Frame::new()
         .fill(CARD)
         .stroke(Stroke::new(1.0, CARD_BORDER))
@@ -737,8 +759,7 @@ fn card(ui: &mut Ui, icon: &str, title: &str, body: impl FnOnce(&mut Ui)) {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
-                ui.painter().rect_filled(rect, 7, ACCENT.gamma_multiply(0.16));
-                ui.painter().text(rect.center(), Align2::CENTER_CENTER, icon, FontId::new(14.0, icons()), ACCENT);
+                icon(ui, rect);
                 ui.add_space(4.0);
                 ui.label(RichText::new(title).family(semibold()).size(15.0).color(TEXT));
             });
