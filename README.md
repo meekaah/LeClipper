@@ -1,8 +1,15 @@
 # LeClipper
 
-Windows tray app that records a region of the screen to MP4 (hardware H.264, up to 60 fps) and saves it as MP4/GIF or uploads it to Imgur. You can also drag the preview straight onto the Imgur upload page, Discord, a folder, …. See [SPEC.md](SPEC.md) for the design decisions.
+Windows tray app that records a region of the screen to MP4 (hardware H.264, up to 60 fps) and saves it as MP4/GIF or uploads it to Imgur. You can also drag the preview straight onto the Imgur upload page, Discord, a folder etc
 
-https://github.com/user-attachments/assets/d851c626-7c8f-4958-9fe2-f49e86532298
+<p>
+   <img width="662" height="645" alt="leclipper_fXE8lEIaGt" src="https://github.com/user-attachments/assets/7a80b49b-511a-4cb6-a049-63dee01d33f7" />
+</p>
+<p>
+   <img width="225" height="198" alt="leclipper_NsUDa24xM4" src="https://github.com/user-attachments/assets/95cc7aa5-93c7-4c98-8f3c-c526ad68e032" />
+   <img width="225" height="198" alt="leclipper_BKbTE29OmS" src="https://github.com/user-attachments/assets/69d40a37-90df-438c-8252-4f54108144d4" />
+   <img width="225" height="198" alt="leclipper_SbWZzsIZPp" src="https://github.com/user-attachments/assets/d545a126-4cea-47ba-8df4-9b31c5b27d80" />
+</p>
 
 ## Build
 
