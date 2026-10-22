@@ -17,7 +17,7 @@ Output: `target/release/screen2imgur.exe`, a single ~7 MB exe (Windows 10 2004+ 
 3. Drag a rectangle. A click or **Enter** selects the whole monitor; **Esc** or right-click cancels.
 4. The region stays on screen with a green border, and you can use your desktop normally. Resize it by dragging its edges or corner handles, and move it by dragging the toolbar's grip. When you're ready, press **● Record** (or the hotkey, or click the tray icon). **✕** cancels.
 
-   Nothing is remembered between recordings: every time you press the hotkey (or the tray's **Record region**) you start over with the full-screen overlay and drag a fresh rectangle. When you release it, the region appears with a green border, live on your desktop, and waits until you press **● Record** (or the hotkey, or the tray icon) again. From that armed state, the tray's **Select new region** drops it and takes you back to the full-screen overlay for a new drag.
+   Nothing is remembered between recordings: every time you press the hotkey (or the tray's **Record region**) you start over with the full-screen overlay and drag a fresh rectangle. When you release it, the region appears with a green border, live on your desktop, and waits until you press **● Record** (or the hotkey, or the tray icon) again.
 5. A red border and a small timer bar show while recording. Neither is captured. Stop with the hotkey, the bar's **Stop** button, or the tray icon.
 6. The popup plays the clip on a loop (click it to pause). Choose **Save MP4**, **Save GIF** or **Upload to Imgur**, or drag it somewhere (below).
 

@@ -37,7 +37,6 @@ enum State {
 
 struct Menus {
     record: MenuItem,
-    reselect: MenuId,
     settings: MenuId,
     folder: MenuId,
     quit: MenuId,
@@ -119,12 +118,11 @@ pub fn run() -> Result<()> {
 
         let cfg = Config::load();
         let record = MenuItem::new("Record region", true, None);
-        let reselect = MenuItem::new("Select new region", true, None);
         let settings = MenuItem::new("Settings…", true, None);
         let folder = MenuItem::new("Open output folder", true, None);
         let quit = MenuItem::new("Quit", true, None);
         let menu = Menu::new();
-        menu.append_items(&[&record, &reselect, &PredefinedMenuItem::separator(), &settings, &folder, &PredefinedMenuItem::separator(), &quit])?;
+        menu.append_items(&[&record, &PredefinedMenuItem::separator(), &settings, &folder, &PredefinedMenuItem::separator(), &quit])?;
 
         let tray = TrayIconBuilder::new()
             .with_icon(icon(false))
@@ -139,7 +137,7 @@ pub fn run() -> Result<()> {
             hwnd,
             cfg,
             tray,
-            menus: Menus { record, reselect: reselect.id().clone(), settings: settings.id().clone(), folder: folder.id().clone(), quit: quit.id().clone() },
+            menus: Menus { record, settings: settings.id().clone(), folder: folder.id().clone(), quit: quit.id().clone() },
             hotkeys,
             hotkey: None,
             state: State::Idle,
@@ -236,8 +234,6 @@ impl App {
                 let id = *unsafe { Box::from_raw(lp.0 as *mut MenuId) };
                 if id == *self.menus.record.id() {
                     self.toggle();
-                } else if id == self.menus.reselect {
-                    self.reselect();
                 } else if id == self.menus.settings {
                     self.open_settings();
                 } else if id == self.menus.folder {
@@ -303,18 +299,6 @@ impl App {
         match overlay::select_region(self.hwnd) {
             Ok(h) => self.state = State::Selecting(h),
             Err(e) => message_box(&format!("Couldn't open the region selector: {e}"), true),
-        }
-    }
-
-    /// Cancels any armed region and lets the user drag a new one.
-    fn reselect(&mut self) {
-        match self.state {
-            State::Idle => self.select(),
-            State::Armed(_) => {
-                self.disarm();
-                self.select();
-            }
-            _ => {}
         }
     }
 

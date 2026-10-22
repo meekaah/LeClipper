@@ -11,7 +11,7 @@ Windows tray app (Rust) that records a selected screen region to MP4/GIF and sav
 | Trigger | Tray icon + global hotkey (default `Ctrl+Shift+R`: start region select; press again to start recording, then again to stop) |
 | Region | Drag a rectangle on a dimmed full-screen overlay; one monitor at a time; per-monitor DPI aware; `Esc` cancels |
 | Before recording | Green border around the live (unfrozen) region, resizable by its edges/handles, movable via a toolbar with **Record** and cancel; both excluded from capture |
-| Repeat | Nothing is remembered between recordings: every trigger drags a fresh rectangle on the full-screen overlay, and on release the green border is drawn around that live (unfrozen) region, waiting for **Record**. Tray **Select new region** cancels any armed region and drags a new one |
+| Repeat | Nothing is remembered between recordings: every trigger drags a fresh rectangle on the full-screen overlay, and on release the green border is drawn around that live (unfrozen) region, waiting for **Record** |
 | Capture | Windows.Graphics.Capture (GPU), cropped to the region |
 | Cursor | Captured by default, toggle in settings |
 | Audio | None |
