@@ -2,7 +2,7 @@
 name = "leclipper"
 version = "0.1.0"
 edition = "2021"
-description = "Record a screen region to MP4/GIF, then save it or drag it into a browser upload page"
+description = "Record a screen region to MP4/GIF, then save it or drag it into a browser upload page or automatically upload it to Imgur"
 
 [dependencies]
 anyhow = "1"
