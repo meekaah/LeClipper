@@ -8,7 +8,7 @@ Windows tray app that records a region of the screen to MP4 (hardware H.264, up 
 cargo build --release
 ```
 
-Output: `target/release/screen2imgur.exe`, a single ~10 MB exe with no runtime dependencies (Windows 10 2004+ / 11).
+Output: `target/release/screen2imgur.exe`, a single ~7 MB exe (Windows 10 2004+ / 11). Uploading needs the Microsoft Edge WebView2 Runtime, which ships with Windows 11 and current Windows 10.
 
 ## Use
 
@@ -25,10 +25,11 @@ Right-click the tray icon for Settings, the output folder, and Quit.
 
 ## Uploading to Imgur
 
-Imgur no longer hands out API access, so the app uploads through the website itself. **Upload to Imgur** loads imgur.com/upload in a hidden built-in browser window (WebView2, the Edge engine that ships with Windows) and hands the MP4 to the page's own file picker. Imgur sees an ordinary upload from a signed-in browser. When it's done, the post link (`https://imgur.com/a/…`) is copied to the clipboard and shown in the popup. Set **After recording** to *Upload to Imgur* to make this automatic.
+Imgur no longer hands out API access, so the app uploads through the website itself. **Upload to Imgur** loads imgur.com/upload in a hidden built-in browser window (WebView2, the Edge engine that ships with Windows) and hands the MP4 to the page's own file picker. Imgur sees an ordinary upload from a signed-in browser. The popup shows the upload's progress (with **Cancel**). When it's done, the post link (`https://imgur.com/a/…`) is copied to the clipboard and shown in the popup with a **Copy** button. Set **Settings → After recording** to *Upload to Imgur* to make this automatic. Closing the popup mid-upload asks first.
 
 - **Sign-in:** the browser keeps its own profile in `%APPDATA%\screen2imgur\webview`, so you stay signed in like in a normal browser. Sign in under **Settings → Imgur → Sign in…**. If you're signed out when uploading, the window pops up so you can sign in, and the upload carries on afterwards. The app never uploads anonymously and never sees your password.
-- If Imgur asks for something during an upload (a captcha, say), the window shows itself so you can finish it.
+- If Imgur asks for something during an upload (a captcha, say), the window shows itself so you can finish it. Closing the window cancels the upload.
+- If an upload fails, the list of requests the Imgur page made is written to `log.txt`, which shows what changed on Imgur's side.
 - This relies on how imgur.com/upload is built, so an Imgur redesign can break it. Dragging is the fallback: **Open Imgur** opens the upload page in your normal browser, and you drag the popup's preview onto it. Dragging first saves the clip to your output folder (MP4 or GIF, per the "drag MP4 / drag GIF" selector). The same drag works into Discord, chat apps, Explorer, etc.
 - Automated uploads aren't something Imgur's terms bless, so keep it to your own clips at a human pace.
 
