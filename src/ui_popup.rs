@@ -68,6 +68,8 @@ struct Upload {
     rx: Receiver<crate::imgur_web::Event>,
     status: String,
     progress: Option<f32>,
+    /// Lets the tray warn before quitting mid-upload.
+    _marker: Option<crate::children::UploadMarker>,
 }
 
 struct Popup {
@@ -227,7 +229,13 @@ impl Popup {
             wake.request_repaint()
         });
         self.message = None;
-        self.upload = Some(Upload { job, rx, status: "Starting…".into(), progress: None });
+        self.upload = Some(Upload {
+            job,
+            rx,
+            status: "Starting…".into(),
+            progress: None,
+            _marker: crate::children::UploadMarker::new(),
+        });
     }
 
     fn poll_upload(&mut self, ctx: &egui::Context) {

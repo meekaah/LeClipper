@@ -1,5 +1,6 @@
 //! The background process: tray icon, global hotkey, region selection and recording.
-//! Settings and the post-recording popup run as child processes of the same exe.
+//! Settings and the post-recording popup run as child processes of the same exe, which
+//! exit with it (see `children`).
 
 use std::cell::RefCell;
 use std::str::FromStr;
@@ -69,6 +70,18 @@ fn message_box(text: &str, error: bool) {
     unsafe {
         MessageBoxW(None, PCWSTR(t.as_ptr()), w!("screen2imgur"), flags | MB_OK | MB_SETFOREGROUND);
     }
+}
+
+fn confirm_quit_during_upload() -> bool {
+    let answer = unsafe {
+        MessageBoxW(
+            None,
+            w!("An Imgur upload is still running. Quitting will cancel it.\n\nQuit anyway?"),
+            w!("screen2imgur"),
+            MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2 | MB_SETFOREGROUND,
+        )
+    };
+    answer == IDYES
 }
 
 pub fn run() -> Result<()> {
@@ -240,6 +253,10 @@ impl App {
                     let _ = std::fs::create_dir_all(&self.cfg.output_dir);
                     let _ = open::that(&self.cfg.output_dir);
                 } else if id == self.menus.quit {
+                    // Quitting closes the popups (they're in our job), which cancels their uploads.
+                    if crate::children::upload_in_progress() && !confirm_quit_during_upload() {
+                        return false;
+                    }
                     if let State::Recording { .. } = self.state {
                         self.stop();
                     }
@@ -387,6 +404,7 @@ impl App {
         }
         match std::env::current_exe().and_then(|exe| std::process::Command::new(exe).arg("settings").spawn()) {
             Ok(mut child) => {
+                crate::children::adopt(&child);
                 self.settings_open = true;
                 let raw = self.hwnd.0 as isize;
                 std::thread::spawn(move || {
@@ -410,8 +428,9 @@ impl App {
                 .arg(r.duration_ms.to_string())
                 .spawn()
         });
-        if let Err(e) = spawned {
-            message_box(&format!("Recording saved to {}\nbut the popup failed to open: {e}", r.path.display()), true);
+        match spawned {
+            Ok(child) => crate::children::adopt(&child),
+            Err(e) => message_box(&format!("Recording saved to {}\nbut the popup failed to open: {e}", r.path.display()), true),
         }
     }
 }
