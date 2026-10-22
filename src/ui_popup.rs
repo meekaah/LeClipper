@@ -1,8 +1,8 @@
 //! Post-recording popup (runs as `leclipper.exe popup <file> <w> <h> <ms>`).
 //!
 //! Top to bottom: a header with the clip's details, the looping preview (click to pause,
-//! drag to drop the file anywhere), the action bar, and a scrolling stack of running jobs
-//! and results, with the latest message pinned under it.
+//! drag to drop the file anywhere), the trim bar, the action bar, and a scrolling stack of
+//! running jobs and results, with the latest message pinned under it.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -77,6 +77,13 @@ const MIN_PREVIEW_H: f32 = 140.0;
 const WINDOW_W: f32 = 660.0;
 /// The panel's horizontal and vertical inner margins.
 const MARGIN: (i8, i8) = (18, 14);
+/// The trimmed clip is never shorter than this, in seconds.
+const MIN_TRIM: f64 = 0.1;
+/// After the end knob moves, playback picks up this long before the end, to show the cut.
+const END_LEAD_IN: f64 = 1.5;
+/// Height of the trim bar, and the space above it.
+const TRIM_H: f32 = 28.0;
+const TRIM_GAP: f32 = 10.0;
 
 pub fn run(args: Args) -> Result<()> {
     if !args.path.exists() {
@@ -84,13 +91,14 @@ pub fn run(args: Args) -> Result<()> {
     }
     let temp_mp4 = args.path.clone();
     let temp_gif = temp_mp4.with_extension("gif");
+    let temp_cut = cut_path(&temp_mp4);
     // Close to what the window fits itself to on the first frame, so it doesn't visibly jump.
     let preview_w = WINDOW_W - 2.0 * MARGIN.0 as f32;
     let preview_h = (preview_w * args.height.max(1) as f32 / args.width.max(1) as f32).min(args.height as f32);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("LeClipper — recording")
-            .with_inner_size([WINDOW_W, preview_h.max(MIN_PREVIEW_H) + 147.0])
+            .with_inner_size([WINDOW_W, preview_h.max(MIN_PREVIEW_H) + 147.0 + TRIM_GAP + TRIM_H])
             .with_min_inner_size([440.0, 260.0])
             .with_always_on_top()
             .with_active(true)
@@ -105,6 +113,7 @@ pub fn run(args: Args) -> Result<()> {
     .map_err(|e| anyhow!("{e}"));
     let _ = std::fs::remove_file(&temp_mp4);
     let _ = std::fs::remove_file(&temp_gif);
+    let _ = std::fs::remove_file(&temp_cut);
     res
 }
 
@@ -115,16 +124,50 @@ struct JobProgress {
 
 enum JobDone {
     Saved(PathBuf),
+    /// The trimmed MP4 is ready in the temp folder.
+    Cut(PathBuf),
     Failed(String),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum JobKind {
+    /// Copying the MP4 to the output folder.
+    Mp4,
+    /// A GIF export (cancellable, reports frames).
+    Gif,
+    /// Re-encoding the trimmed part of the MP4.
+    Cut,
 }
 
 struct Job {
     progress: Arc<JobProgress>,
     rx: Receiver<JobDone>,
-    /// A GIF export (cancellable, reports frames) rather than an MP4 copy.
-    gif: bool,
+    kind: JobKind,
+    /// The trim the job works on.
+    trim: Trim,
     /// Started from a Save button: the window closes once the file is saved.
     close_when_done: bool,
+}
+
+/// The part of the recording to keep, in seconds from its start.
+#[derive(Clone, Copy, PartialEq)]
+struct Trim {
+    start: f64,
+    end: f64,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Knob {
+    Start,
+    End,
+}
+
+/// What waits for the trimmed MP4.
+#[derive(Clone, Copy, PartialEq)]
+enum AfterCut {
+    SaveMp4 { close: bool },
+    Upload,
+    Drag,
 }
 
 struct Upload {
@@ -153,8 +196,15 @@ struct Popup {
     base_name: String,
     preview: crate::preview::Preview,
     drag_format: DragFormat,
+    trim: Trim,
+    /// The trim knob being dragged.
+    knob: Option<Knob>,
+    /// The trimmed MP4 in the temp folder, and the trim it was made for.
+    cut: Option<(Trim, PathBuf)>,
+    after_cut: Option<AfterCut>,
     job: Option<Job>,
-    saved: Vec<PathBuf>,
+    /// Saved files, and the trim each was saved with.
+    saved: Vec<(PathBuf, Trim)>,
     upload: Option<Upload>,
     /// Imgur post link once uploaded.
     link: Option<String>,
@@ -187,6 +237,10 @@ impl Popup {
         Self {
             base_name: format!("LeClipper_{}", chrono::Local::now().format("%Y-%m-%d_%H-%M-%S")),
             drag_format: cfg.drag_format,
+            trim: Trim { start: 0.0, end: args.duration_ms as f64 / 1000.0 },
+            knob: None,
+            cut: None,
+            after_cut: None,
             cfg,
             args,
             preview,
@@ -198,7 +252,7 @@ impl Popup {
             message: None,
             confirm_discard: false,
             ran_default: false,
-            below_h: 110.0,
+            below_h: 110.0 + TRIM_GAP + TRIM_H,
             hwnd: window_handle(cc),
             placed_for: None,
             placed: false,
@@ -207,6 +261,14 @@ impl Popup {
 
     fn say(&mut self, text: impl Into<String>, tone: Tone) {
         self.message = Some(Message { text: text.into(), tone });
+    }
+
+    fn duration(&self) -> f64 {
+        self.args.duration_ms as f64 / 1000.0
+    }
+
+    fn trimmed(&self) -> bool {
+        self.trim != Trim { start: 0.0, end: self.duration() }
     }
 
     fn gif_options(&self) -> GifOptions {
@@ -227,7 +289,7 @@ impl Popup {
     fn spawn(
         &mut self,
         ctx: &egui::Context,
-        gif: bool,
+        kind: JobKind,
         close_when_done: bool,
         work: impl FnOnce(&JobProgress) -> JobDone + Send + 'static,
     ) {
@@ -241,11 +303,51 @@ impl Popup {
             ctx.request_repaint();
         });
         self.message = None;
-        self.job = Some(Job { progress, rx, gif, close_when_done });
+        self.job = Some(Job { progress, rx, kind, trim: self.trim, close_when_done });
     }
 
+    /// The file of this type saved with the current trim.
     fn saved_with_ext(&self, ext: &str) -> Option<PathBuf> {
-        self.saved.iter().find(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext))).cloned()
+        self.saved
+            .iter()
+            .find(|(p, t)| *t == self.trim && p.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext)))
+            .map(|(p, _)| p.clone())
+    }
+
+    /// The MP4 for the current trim: the recording itself, or a re-encoded cut of it. While the
+    /// cut is still to be made this starts it and returns `None`; `then` runs once it's ready.
+    fn mp4_source(&mut self, ctx: &egui::Context, then: AfterCut) -> Option<PathBuf> {
+        if !self.trimmed() {
+            return Some(self.args.path.clone());
+        }
+        if let Some((_, p)) = self.cut.as_ref().filter(|(t, _)| *t == self.trim) {
+            return Some(p.clone());
+        }
+        match &self.job {
+            Some(j) if j.kind == JobKind::Cut => {}
+            Some(_) => {
+                self.say("Wait for the current export to finish.", Tone::Info);
+                return None;
+            }
+            None => {
+                let src = self.args.path.clone();
+                let dst = cut_path(&src);
+                let crop = (self.args.width, self.args.height);
+                let range = (self.trim.start, self.trim.end);
+                let (fps, bitrate) = (self.cfg.video_fps, self.cfg.video_bitrate(crop.0, crop.1));
+                self.spawn(ctx, JobKind::Cut, false, move |_| {
+                    match crate::mp4enc::trim(&src, &dst, crop, range, fps, bitrate) {
+                        Ok(()) => JobDone::Cut(dst),
+                        Err(e) => JobDone::Failed(format!("Trimming failed: {e:#}")),
+                    }
+                });
+            }
+        }
+        self.after_cut = Some(then);
+        if then == AfterCut::Drag {
+            self.say("Trimming first. Drag again once it's done.", Tone::Info);
+        }
+        None
     }
 
     /// With `close`, the window closes once the file is saved.
@@ -258,9 +360,9 @@ impl Popup {
             }
             return;
         }
-        let src = self.args.path.clone();
+        let Some(src) = self.mp4_source(ctx, AfterCut::SaveMp4 { close }) else { return };
         let dst = self.output_path("mp4");
-        self.spawn(ctx, false, close, move |_| {
+        self.spawn(ctx, JobKind::Mp4, close, move |_| {
             let r = (|| -> Result<()> {
                 std::fs::create_dir_all(dst.parent().unwrap_or(Path::new(".")))?;
                 std::fs::copy(&src, &dst)?;
@@ -286,9 +388,10 @@ impl Popup {
         let src = self.args.path.clone();
         let dst = self.output_path("gif");
         let crop = (self.args.width, self.args.height);
+        let trim = self.trimmed().then_some((self.trim.start, self.trim.end));
         let opts = self.gif_options();
-        self.spawn(ctx, true, close, move |p| {
-            match crate::gif::mp4_to_gif(&src, &dst, crop, &opts, p.gif.clone()) {
+        self.spawn(ctx, JobKind::Gif, close, move |p| {
+            match crate::gif::mp4_to_gif(&src, &dst, crop, trim, &opts, p.gif.clone()) {
                 Ok(()) => JobDone::Saved(dst),
                 Err(e) => JobDone::Failed(format!("GIF export failed: {e:#}")),
             }
@@ -302,14 +405,15 @@ impl Popup {
             DragFormat::Mp4 => match self.saved_with_ext("mp4") {
                 Some(p) => p,
                 None => {
+                    let Some(src) = self.mp4_source(ctx, AfterCut::Drag) else { return };
                     let dst = self.output_path("mp4");
                     let copied = std::fs::create_dir_all(dst.parent().unwrap_or(Path::new(".")))
-                        .and_then(|_| std::fs::copy(&self.args.path, &dst));
+                        .and_then(|_| std::fs::copy(&src, &dst));
                     if let Err(e) = copied {
                         self.say(format!("Saving MP4 failed: {e}"), Tone::Error);
                         return;
                     }
-                    self.saved.push(dst.clone());
+                    self.saved.push((dst.clone(), self.trim));
                     dst
                 }
             },
@@ -335,9 +439,10 @@ impl Popup {
         if self.upload.is_some() || self.link.is_some() {
             return;
         }
+        let Some(src) = self.mp4_source(ctx, AfterCut::Upload) else { return };
         let (tx, rx) = mpsc::channel();
         let wake = ctx.clone();
-        let job = crate::imgur_web::start(crate::imgur_web::Task::Upload(self.args.path.clone()), tx, move || {
+        let job = crate::imgur_web::start(crate::imgur_web::Task::Upload(src), tx, move || {
             wake.request_repaint()
         });
         self.message = None;
@@ -390,16 +495,26 @@ impl Popup {
     fn poll(&mut self, ctx: &egui::Context) {
         let Some(job) = &self.job else { return };
         let Ok(done) = job.rx.try_recv() else { return };
-        let close = job.close_when_done;
+        let (close, trim) = (job.close_when_done, job.trim);
         self.job = None;
         match done {
             JobDone::Saved(p) => {
-                self.saved.push(p);
+                self.saved.push((p, trim));
                 if close {
                     self.close_after_save(ctx);
                 }
             }
+            JobDone::Cut(p) => {
+                self.cut = Some((trim, p));
+                match self.after_cut.take() {
+                    Some(AfterCut::SaveMp4 { close }) => self.save_mp4(ctx, close),
+                    Some(AfterCut::Upload) => self.start_upload(ctx),
+                    Some(AfterCut::Drag) => self.say("Trimmed. Drag the preview again to drop it.", Tone::Info),
+                    None => {}
+                }
+            }
             JobDone::Failed(m) => {
+                self.after_cut = None;
                 crate::log(&m);
                 self.say(m, Tone::Error);
             }
@@ -409,7 +524,7 @@ impl Popup {
     // ---- Zones ----
 
     fn header_ui(&self, ui: &mut Ui) {
-        let secs = self.args.duration_ms as f64 / 1000.0;
+        let secs = self.trim.end - self.trim.start;
         let size = std::fs::metadata(&self.args.path).map(|m| m.len()).unwrap_or(0);
         ui.horizontal(|ui| {
             ui.set_min_height(28.0);
@@ -524,11 +639,126 @@ impl Popup {
         }
     }
 
+    /// Two knobs on a track spanning the whole clip. While one is dragged the preview shows the
+    /// frame under it; when it's let go, playback loops over the part kept.
+    fn trim_ui(&mut self, ui: &mut Ui) {
+        let dur = self.duration();
+        // Changing the cut mid-export would mix up which trim a file was made with.
+        let enabled = self.job.is_none() && self.upload.is_none() && dur > MIN_TRIM;
+        ui.add_space(TRIM_GAP);
+        let sense = if enabled { Sense::click_and_drag() } else { Sense::hover() };
+        let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), TRIM_H), sense);
+        let label_w = 50.0;
+        let track = Rect::from_x_y_ranges(row.left() + label_w..=row.right() - label_w, row.center().y - 3.0..=row.center().y + 3.0);
+        let to_x = |t: f64| track.left() + (t / dur.max(1e-6)) as f32 * track.width();
+        let to_t = |x: f32| ((x - track.left()) / track.width()).clamp(0.0, 1.0) as f64 * dur;
+        let (sx, ex) = (to_x(self.trim.start), to_x(self.trim.end));
+        let nearest = |x: f32| {
+            let (ds, de) = ((x - sx).abs(), (x - ex).abs());
+            // Knobs on top of each other: go by which side of them the pointer is.
+            if (ds - de).abs() < 1.0 {
+                if x < sx { Knob::Start } else { Knob::End }
+            } else if ds < de {
+                Knob::Start
+            } else {
+                Knob::End
+            }
+        };
+
+        if resp.drag_started() {
+            self.knob = ui.input(|i| i.pointer.press_origin()).map(|p| nearest(p.x));
+        }
+        if let (Some(k), Some(p), true) = (self.knob, resp.interact_pointer_pos(), resp.dragged()) {
+            self.move_knob(k, to_t(p.x));
+        }
+        if resp.drag_stopped() {
+            if let Some(k) = self.knob.take() {
+                self.play_trim(k);
+            }
+        }
+        if resp.double_clicked() {
+            self.trim = Trim { start: 0.0, end: dur };
+            self.preview.play(0.0, dur, 0.0);
+        } else if let (true, Some(p)) = (resp.clicked(), resp.interact_pointer_pos()) {
+            let k = nearest(p.x);
+            self.move_knob(k, to_t(p.x));
+            self.play_trim(k);
+        }
+
+        let hover_knob = resp.hover_pos().filter(|p| row.contains(*p)).map(|p| p.x).filter(|x| {
+            (x - sx).abs() <= 10.0 || (x - ex).abs() <= 10.0
+        });
+        if enabled {
+            let resize = self.knob.is_some() || hover_knob.is_some();
+            resp.on_hover_cursor(if resize { egui::CursorIcon::ResizeHorizontal } else { egui::CursorIcon::PointingHand });
+        }
+
+        // Positions may have moved above.
+        let (sx, ex) = (to_x(self.trim.start), to_x(self.trim.end));
+        let dim = |c: Color32| if enabled { c } else { c.gamma_multiply(0.45) };
+        let p = ui.painter();
+        p.rect_filled(track, 3, BORDER);
+        let kept = Rect::from_x_y_ranges(sx..=ex, track.y_range());
+        p.rect_filled(kept, 3, dim(ACCENT));
+        if let Some(t) = self.preview.playhead().filter(|_| self.knob.is_none()) {
+            let x = to_x(t).clamp(sx, ex);
+            p.line_segment([Pos2::new(x, track.top() - 5.0), Pos2::new(x, track.bottom() + 5.0)], Stroke::new(2.0, WHITE));
+            if !self.preview.paused() {
+                ui.ctx().request_repaint_after(Duration::from_millis(33));
+            }
+        }
+        for (knob, x) in [(Knob::Start, sx), (Knob::End, ex)] {
+            let active = self.knob == Some(knob);
+            let hot = active || hover_knob.is_some_and(|h| nearest(h) == knob);
+            let hover = ui.ctx().animate_bool_with_time(ui.id().with(("trim-knob", knob == Knob::Start)), hot && enabled, 0.12);
+            let size = vec2(10.0 + 2.0 * hover, 22.0 + 2.0 * hover);
+            let rect = Rect::from_center_size(Pos2::new(x, row.center().y), size);
+            p.rect(rect, 4, dim(mix(TEXT, WHITE, hover)), Stroke::new(1.0, Color32::from_black_alpha(90)), StrokeKind::Outside);
+            p.line_segment(
+                [Pos2::new(x, rect.center().y - 5.0), Pos2::new(x, rect.center().y + 5.0)],
+                Stroke::new(1.5, dim(BORDER)),
+            );
+        }
+
+        let font = FontId::proportional(12.5);
+        let color = |moved: bool, k: Knob| if self.knob == Some(k) { WHITE } else if moved { TEXT } else { WEAK };
+        let start_c = color(self.trim.start > 0.0, Knob::Start);
+        let end_c = color(self.trim.end < dur, Knob::End);
+        p.text(Pos2::new(row.left(), row.center().y), Align2::LEFT_CENTER, clock(self.trim.start), font.clone(), start_c);
+        p.text(Pos2::new(row.right(), row.center().y), Align2::RIGHT_CENTER, clock(self.trim.end), font, end_c);
+    }
+
+    /// Puts a knob at `t`, keeping the clip at least `MIN_TRIM` long, and shows the frame there.
+    fn move_knob(&mut self, knob: Knob, t: f64) {
+        let dur = self.duration();
+        match knob {
+            Knob::Start => {
+                self.trim.start = t.clamp(0.0, (self.trim.end - MIN_TRIM).max(0.0));
+                self.preview.show_at(self.trim.start);
+            }
+            Knob::End => {
+                self.trim.end = t.clamp((self.trim.start + MIN_TRIM).min(dur), dur);
+                // The last frame kept is the one on screen just before the end.
+                self.preview.show_at((self.trim.end - 0.001).max(self.trim.start));
+            }
+        }
+    }
+
+    /// Loops the kept part, starting where the moved knob shows the cut best.
+    fn play_trim(&mut self, knob: Knob) {
+        let Trim { start, end } = self.trim;
+        let from = match knob {
+            Knob::Start => start,
+            Knob::End => (end - END_LEAD_IN).max(start),
+        };
+        self.preview.play(start, end, from);
+    }
+
     fn actions_ui(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         let busy = self.job.is_some();
         let (up_icon, up_text) = if self.link.is_some() {
             (ICON_CHECK, "Uploaded")
-        } else if self.upload.is_some() {
+        } else if self.upload.is_some() || self.after_cut == Some(AfterCut::Upload) {
             (ICON_UPLOAD, "Uploading…")
         } else {
             (ICON_UPLOAD, "Upload to Imgur")
@@ -544,7 +774,7 @@ impl Popup {
         let (mp4, gif) = if fits { ("Save MP4", "Save GIF") } else { ("MP4", "GIF") };
 
         ui.horizontal(|ui| {
-            let can_upload = self.upload.is_none() && self.link.is_none();
+            let can_upload = self.upload.is_none() && self.link.is_none() && self.after_cut != Some(AfterCut::Upload);
             if button_with(ui, up_icon, up_text, Kind::Primary, can_upload, 34.0, Some(half)).clicked() {
                 self.start_upload(ctx);
             }
@@ -576,16 +806,22 @@ impl Popup {
 
     fn job_ui(&self, ui: &mut Ui, job: &Job) {
         let g = &job.progress.gif;
-        let expected = (self.args.duration_ms * self.cfg.gif_fps as u64 / 1000).max(1);
+        let gif = job.kind == JobKind::Gif;
+        let expected = (((job.trim.end - job.trim.start) * self.cfg.gif_fps as f64) as u64).max(1);
         let out = g.frames_out.load(Ordering::Relaxed) as u64;
         let started = out > 0 || g.frames_in.load(Ordering::Relaxed) > 0;
-        let frac = (job.gif && started).then(|| (out as f32 / expected as f32).min(1.0));
+        let frac = (gif && started).then(|| (out as f32 / expected as f32).min(1.0));
+        let (icon, label) = match job.kind {
+            JobKind::Mp4 => (ICON_SAVE, "Saving MP4…"),
+            JobKind::Gif => (ICON_PICTURE, "Making GIF…"),
+            JobKind::Cut => (ICON_VIDEO, "Trimming…"),
+        };
         panel(ui, CARD, BORDER, |ui| {
             ui.horizontal(|ui| {
-                glyph(ui, if job.gif { ICON_PICTURE } else { ICON_SAVE }, 14.0, ACCENT);
-                ui.label(RichText::new(if job.gif { "Making GIF…" } else { "Saving MP4…" }).color(TEXT));
+                glyph(ui, icon, 14.0, ACCENT);
+                ui.label(RichText::new(label).color(TEXT));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if job.gif && icon_button(ui, ICON_CLOSE, "Cancel").clicked() {
+                    if gif && icon_button(ui, ICON_CLOSE, "Cancel").clicked() {
                         g.cancel.store(true, Ordering::Relaxed);
                     }
                     if frac.is_some() {
@@ -670,10 +906,12 @@ impl Popup {
     fn confirm_ui(&mut self, ctx: &egui::Context) {
         let (title, body, confirm) = if self.upload.is_some() {
             ("Upload in progress", "The Imgur upload is still running. Close anyway?", "Close anyway")
-        } else if self.job.as_ref().is_some_and(|j| j.gif) {
-            ("Export in progress", "A GIF export is still running. Close anyway?", "Close anyway")
-        } else if self.job.is_some() {
-            ("Save in progress", "The MP4 is still being saved. Close anyway?", "Close anyway")
+        } else if let Some(job) = &self.job {
+            match job.kind {
+                JobKind::Gif => ("Export in progress", "A GIF export is still running. Close anyway?", "Close anyway"),
+                JobKind::Mp4 => ("Save in progress", "The MP4 is still being saved. Close anyway?", "Close anyway"),
+                JobKind::Cut => ("Trim in progress", "The clip is still being trimmed. Close anyway?", "Close anyway"),
+            }
         } else {
             ("Unsaved recording", "This recording hasn't been saved. Discard it?", "Discard")
         };
@@ -765,6 +1003,7 @@ impl eframe::App for Popup {
             self.preview_ui(ui, ctx, (preview_max - self.below_h).max(MIN_PREVIEW_H));
 
             let top = ui.cursor().top();
+            self.trim_ui(ui);
             ui.add_space(10.0);
             self.actions_ui(ui, ctx);
             if self.has_activity() {
@@ -847,6 +1086,17 @@ fn place_window(hwnd: isize, client_h: i32) {
         let y = a.top + ((a.bottom - a.top) - vis_h).max(0) / 2 - (frame.top - outer.top);
         let _ = SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
     }
+}
+
+/// Where the trimmed copy of the recording `rec` goes.
+fn cut_path(rec: &Path) -> PathBuf {
+    rec.with_extension("trim.mp4")
+}
+
+/// `t` seconds as m:ss.s.
+fn clock(t: f64) -> String {
+    let tenths = (t.max(0.0) * 10.0).round() as u64;
+    format!("{}:{:02}.{}", tenths / 600, tenths / 10 % 60, tenths % 10)
 }
 
 fn file_name(p: &Path) -> String {

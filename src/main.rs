@@ -67,13 +67,34 @@ fn selftest(args: &[String]) -> anyhow::Result<()> {
     let t = std::time::Instant::now();
     let opts = gif::GifOptions { fps: cfg.gif_fps, max_width: cfg.gif_max_width, quality: cfg.gif_quality };
     let prog = std::sync::Arc::new(gif::Progress::default());
-    gif::mp4_to_gif(&mp4, std::path::Path::new("selftest.gif"), (w, h), &opts, prog.clone())?;
+    gif::mp4_to_gif(&mp4, std::path::Path::new("selftest.gif"), (w, h), None, &opts, prog.clone())?;
     println!(
         "gif: {} frames in, {} out, {} bytes (took {:?})",
         prog.frames_in.load(std::sync::atomic::Ordering::Relaxed),
         prog.frames_out.load(std::sync::atomic::Ordering::Relaxed),
         std::fs::metadata("selftest.gif")?.len(),
         t.elapsed()
+    );
+
+    // Keep the middle half.
+    let t = std::time::Instant::now();
+    let secs = r.duration_ms as f64 / 1000.0;
+    let range = (secs * 0.25, secs * 0.75);
+    let trimmed = std::path::Path::new("selftest_trim.mp4");
+    mp4enc::trim(&mp4, trimmed, (w, h), range, cfg.video_fps, cfg.video_bitrate(w, h))?;
+    let took = t.elapsed();
+    let (mut frames, mut last) = (0, 0.0);
+    decode::for_each_frame(trimmed, Some((w, h)), |f| {
+        frames += 1;
+        last = f.time_secs;
+        Ok(true)
+    })?;
+    println!(
+        "trim {:.2}..{:.2}s: {frames} frames, last at {last:.2}s, {} bytes (took {:?})",
+        range.0,
+        range.1,
+        std::fs::metadata(trimmed)?.len(),
+        took
     );
     Ok(())
 }

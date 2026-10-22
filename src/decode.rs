@@ -1,4 +1,4 @@
-//! Decodes the recorded MP4 back into RGBA frames (for GIF export and the preview thumbnail).
+//! Decodes the recorded MP4 back into RGBA frames (for GIF export, trimming and the preview).
 
 use std::path::Path;
 
@@ -11,6 +11,7 @@ pub struct Frame {
     pub height: u32,
     /// RGBA, top-down, tightly packed.
     pub rgba: Vec<u8>,
+    /// Seconds from the recording's first frame.
     pub time_secs: f64,
 }
 
@@ -21,96 +22,187 @@ const FIRST_VIDEO: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 pub fn for_each_frame(
     path: &Path,
     crop: Option<(u32, u32)>,
-    on_frame: impl FnMut(Frame) -> Result<bool>,
-) -> Result<()> {
-    read_frames(path, crop, None, false, on_frame)
-}
-
-/// Like [`for_each_frame`], but Media Foundation decodes and scales the frames to `size`
-/// on the GPU when it can, which is far cheaper than converting full-size frames and
-/// shrinking them afterwards. With `repeat`, it starts over at the end of the stream
-/// (timestamps restart too) until `on_frame` returns `false`.
-pub fn for_each_frame_scaled(
-    path: &Path,
-    size: (u32, u32),
-    repeat: bool,
-    on_frame: impl FnMut(Frame) -> Result<bool>,
-) -> Result<()> {
-    read_frames(path, Some(size), Some(size), repeat, on_frame)
-}
-
-fn read_frames(
-    path: &Path,
-    crop: Option<(u32, u32)>,
-    scale_to: Option<(u32, u32)>,
-    repeat: bool,
     mut on_frame: impl FnMut(Frame) -> Result<bool>,
 ) -> Result<()> {
-    unsafe {
-        let _ = windows::Win32::System::Com::CoInitializeEx(
-            None,
-            windows::Win32::System::Com::COINIT_MULTITHREADED,
-        );
-        crate::mp4enc::mf_startup()?;
+    let mut reader = Reader::open(path, crop, None)?;
+    while let Some(f) = reader.next_frame()? {
+        if !on_frame(f)? {
+            break;
+        }
+    }
+    Ok(())
+}
 
-        let mut attrs: Option<IMFAttributes> = None;
-        MFCreateAttributes(&mut attrs, 1)?;
-        let attrs = attrs.context("MFCreateAttributes")?;
-        // Kept alive for as long as the reader uses it.
-        let mut _gpu: Option<IMFDXGIDeviceManager> = None;
-        if scale_to.is_some() {
-            // Only the advanced video processor can resize. With a D3D device it decodes and
-            // scales on the GPU; without one it falls back to (multithreaded) software.
-            attrs.SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)?;
-            if let Ok(manager) = dxgi_manager() {
-                attrs.SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, &manager)?;
-                _gpu = Some(manager);
+/// Like [`for_each_frame`], cut to what is on screen from `start` to `end` seconds: the frame
+/// showing at `start` comes first, and times count from `start`.
+pub fn for_each_frame_trimmed(
+    path: &Path,
+    crop: Option<(u32, u32)>,
+    (start, end): (f64, f64),
+    mut on_frame: impl FnMut(Frame) -> Result<bool>,
+) -> Result<()> {
+    let mut reader = Reader::open(path, crop, None)?;
+    if start > 0.0 {
+        reader.seek(start)?;
+    }
+    // The latest frame at or before `start`, until one after it shows up.
+    let mut held: Option<Frame> = None;
+    while let Some(mut f) = reader.next_frame()? {
+        if f.time_secs >= end {
+            break;
+        }
+        if f.time_secs <= start {
+            held = Some(f);
+            continue;
+        }
+        if let Some(mut h) = held.take() {
+            h.time_secs = 0.0;
+            if !on_frame(h)? {
+                return Ok(());
             }
-        } else {
-            attrs.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)?;
         }
-
-        let url = HSTRING::from(path.as_os_str());
-        let reader = MFCreateSourceReaderFromURL(PCWSTR(url.as_ptr()), &attrs)
-            .context("open recording for decoding")?;
-
-        let want = MFCreateMediaType()?;
-        want.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-        want.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)?;
-        if let Some((sw, sh)) = scale_to {
-            want.SetUINT64(&MF_MT_FRAME_SIZE, (sw as u64) << 32 | sh as u64)?;
+        f.time_secs -= start;
+        if !on_frame(f)? {
+            return Ok(());
         }
-        reader
-            .SetCurrentMediaType(FIRST_VIDEO, None, &want)
-            .context("decoder cannot output RGB32")?;
+    }
+    if let Some(mut h) = held {
+        h.time_secs = 0.0;
+        on_frame(h)?;
+    }
+    Ok(())
+}
 
-        let cur = reader.GetCurrentMediaType(FIRST_VIDEO)?;
-        let size = cur.GetUINT64(&MF_MT_FRAME_SIZE)?;
-        let (fw, fh) = ((size >> 32) as u32, size as u32);
-        let default_stride = cur.GetUINT32(&MF_MT_DEFAULT_STRIDE).map(|v| v as i32).unwrap_or(fw as i32 * 4);
-        let (w, h) = match crop {
-            Some((cw, ch)) => (cw.min(fw), ch.min(fh)),
-            None => (fw, fh),
-        };
+/// A decoded frame still held by the decoder.
+pub struct Sample {
+    sample: IMFSample,
+    /// Seconds from the recording's first frame.
+    pub time_secs: f64,
+}
 
-        let mut any = false;
-        loop {
-            let mut flags = 0u32;
-            let mut ts = 0i64;
-            let mut sample: Option<IMFSample> = None;
-            reader.ReadSample(FIRST_VIDEO, 0, None, Some(&mut flags), Some(&mut ts), Some(&mut sample))?;
-            if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
-                if !repeat || !any {
-                    break;
+impl Sample {
+    pub fn sample(&self) -> &IMFSample {
+        &self.sample
+    }
+}
+
+/// Reads frames one at a time, and can seek.
+pub struct Reader {
+    reader: IMFSourceReader,
+    /// Kept alive for as long as the reader uses it.
+    _gpu: Option<IMFDXGIDeviceManager>,
+    frame_size: (u32, u32),
+    size: (u32, u32),
+    default_stride: i32,
+    /// Timestamp of the first frame, in 100 ns units.
+    first: Option<i64>,
+}
+
+impl Reader {
+    /// With `scale_to`, Media Foundation decodes and scales the frames on the GPU when it can,
+    /// which is far cheaper than converting full-size frames and shrinking them afterwards.
+    pub fn open(path: &Path, crop: Option<(u32, u32)>, scale_to: Option<(u32, u32)>) -> Result<Self> {
+        Self::open_with(path, crop, scale_to, &MFVideoFormat_RGB32, None)
+    }
+
+    /// For re-encoding on the GPU: frames come out as NV12 surfaces on `gpu`, exactly `size`
+    /// (without the decoder's padding). Their pixels can't be read with [`Reader::pixels`].
+    pub fn open_nv12(path: &Path, size: (u32, u32), gpu: &IMFDXGIDeviceManager) -> Result<Self> {
+        Self::open_with(path, Some(size), Some(size), &MFVideoFormat_NV12, Some(gpu.clone()))
+    }
+
+    fn open_with(
+        path: &Path,
+        crop: Option<(u32, u32)>,
+        scale_to: Option<(u32, u32)>,
+        subtype: &GUID,
+        gpu: Option<IMFDXGIDeviceManager>,
+    ) -> Result<Self> {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_MULTITHREADED,
+            );
+            crate::mp4enc::mf_startup()?;
+
+            let mut attrs: Option<IMFAttributes> = None;
+            MFCreateAttributes(&mut attrs, 1)?;
+            let attrs = attrs.context("MFCreateAttributes")?;
+            let mut gpu = gpu;
+            if scale_to.is_some() {
+                // Only the advanced video processor can resize. With a D3D device it decodes and
+                // scales on the GPU; without one it falls back to (multithreaded) software.
+                attrs.SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)?;
+                if gpu.is_none() {
+                    gpu = dxgi_manager().ok();
                 }
-                // Rewinding keeps the decoder, which is much faster than reopening the file.
-                reader.SetCurrentPosition(&GUID::zeroed(), &start_position())?;
-                continue;
+                if let Some(manager) = &gpu {
+                    attrs.SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, manager)?;
+                }
+            } else {
+                attrs.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)?;
             }
-            let Some(sample) = sample else { continue };
-            any = true;
-            let buf = sample.ConvertToContiguousBuffer()?;
 
+            let url = HSTRING::from(path.as_os_str());
+            let reader = MFCreateSourceReaderFromURL(PCWSTR(url.as_ptr()), &attrs)
+                .context("open recording for decoding")?;
+
+            let want = MFCreateMediaType()?;
+            want.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+            want.SetGUID(&MF_MT_SUBTYPE, subtype)?;
+            if let Some((sw, sh)) = scale_to {
+                want.SetUINT64(&MF_MT_FRAME_SIZE, (sw as u64) << 32 | sh as u64)?;
+            }
+            reader
+                .SetCurrentMediaType(FIRST_VIDEO, None, &want)
+                .context("decoder cannot output the wanted format")?;
+
+            let cur = reader.GetCurrentMediaType(FIRST_VIDEO)?;
+            let size = cur.GetUINT64(&MF_MT_FRAME_SIZE)?;
+            let (fw, fh) = ((size >> 32) as u32, size as u32);
+            let default_stride =
+                cur.GetUINT32(&MF_MT_DEFAULT_STRIDE).map(|v| v as i32).unwrap_or(fw as i32 * 4);
+            let (w, h) = match crop {
+                Some((cw, ch)) => (cw.min(fw), ch.min(fh)),
+                None => (fw, fh),
+            };
+            Ok(Self { reader, _gpu: gpu, frame_size: (fw, fh), size: (w, h), default_stride, first: None })
+        }
+    }
+
+    /// The next frame, or `None` at the end of the stream.
+    pub fn next_frame(&mut self) -> Result<Option<Frame>> {
+        match self.next_sample()? {
+            Some(s) => self.pixels(&s).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Like [`Reader::next_frame`], but leaves the pixels on the decoder until [`Reader::pixels`]
+    /// asks for them, which is much cheaper for frames that are only skipped over.
+    pub fn next_sample(&mut self) -> Result<Option<Sample>> {
+        unsafe {
+            loop {
+                let mut flags = 0u32;
+                let mut ts = 0i64;
+                let mut sample: Option<IMFSample> = None;
+                self.reader.ReadSample(FIRST_VIDEO, 0, None, Some(&mut flags), Some(&mut ts), Some(&mut sample))?;
+                if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                    return Ok(None);
+                }
+                let Some(sample) = sample else { continue };
+                let first = *self.first.get_or_insert(ts);
+                return Ok(Some(Sample { sample, time_secs: (ts - first) as f64 / 10_000_000.0 }));
+            }
+        }
+    }
+
+    /// Copies a sample's pixels out.
+    pub fn pixels(&self, s: &Sample) -> Result<Frame> {
+        let (fw, fh) = self.frame_size;
+        let (w, h) = self.size;
+        unsafe {
+            let buf = s.sample.ConvertToContiguousBuffer()?;
             let mut rgba = vec![0u8; (w * h * 4) as usize];
             // Prefer the 2D lock: it reports the real pitch, which is negative for bottom-up images.
             if let Ok(buf2d) = buf.cast::<IMF2DBuffer>() {
@@ -125,10 +217,10 @@ fn read_frames(
                 buf.Lock(&mut ptr, None, Some(&mut len))?;
                 // The media type reports the cropped size, but the buffer may be padded
                 // (e.g. 1002x562 arrives as 1008x576), so derive the real pitch from its length.
-                let row = default_stride.unsigned_abs() as usize;
+                let row = self.default_stride.unsigned_abs() as usize;
                 let pitch = real_pitch(len as usize, row, fw as usize, fh as usize);
                 let rows = (len as usize / pitch) as isize;
-                let (start, pitch) = if default_stride < 0 {
+                let (start, pitch) = if self.default_stride < 0 {
                     (ptr.offset(pitch as isize * (rows - 1)), -(pitch as isize))
                 } else {
                     (ptr, pitch as isize)
@@ -136,30 +228,34 @@ fn read_frames(
                 copy_rows(start, pitch, w, h, &mut rgba);
                 buf.Unlock()?;
             }
-
-            let frame = Frame { width: w, height: h, rgba, time_secs: ts as f64 / 10_000_000.0 };
-            if !on_frame(frame)? {
-                break;
-            }
+            Ok(Frame { width: w, height: h, rgba, time_secs: s.time_secs })
         }
     }
-    Ok(())
+
+    /// Moves to the key frame at or before `secs`, so the next frames may start a little earlier.
+    /// Seeking keeps the decoder, which is much faster than reopening the file.
+    pub fn seek(&mut self, secs: f64) -> Result<()> {
+        // Recordings start at 0, so that is a safe guess before any frame was read.
+        let first = *self.first.get_or_insert(0);
+        let t = first + (secs.max(0.0) * 10_000_000.0).round() as i64;
+        unsafe { self.reader.SetCurrentPosition(&GUID::zeroed(), &position(t)) }.context("seek")
+    }
 }
 
-/// Position 0 in the source reader's default time format (100 ns units).
-fn start_position() -> windows::Win32::System::Com::StructuredStorage::PROPVARIANT {
+/// `t` in the source reader's default time format (100 ns units).
+fn position(t: i64) -> windows::Win32::System::Com::StructuredStorage::PROPVARIANT {
     use windows::Win32::System::Com::StructuredStorage::*;
     let mut pos = PROPVARIANT::default();
-    // SAFETY: plain-data union; VT_I8 with hVal = 0.
+    // SAFETY: plain-data union; VT_I8 with hVal = t.
     unsafe {
         (*pos.Anonymous.Anonymous).vt = windows::Win32::System::Variant::VT_I8;
-        (*pos.Anonymous.Anonymous).Anonymous.hVal = 0;
+        (*pos.Anonymous.Anonymous).Anonymous.hVal = t;
     }
     pos
 }
 
 /// A Media Foundation device manager around a new hardware D3D11 device.
-unsafe fn dxgi_manager() -> Result<IMFDXGIDeviceManager> {
+pub unsafe fn dxgi_manager() -> Result<IMFDXGIDeviceManager> {
     use windows::Win32::Foundation::HMODULE;
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
     use windows::Win32::Graphics::Direct3D11::*;

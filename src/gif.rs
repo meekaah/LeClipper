@@ -36,6 +36,7 @@ pub fn mp4_to_gif(
     src: &Path,
     dst: &Path,
     crop: (u32, u32),
+    trim: Option<(f64, f64)>,
     opts: &GifOptions,
     progress: Arc<Progress>,
 ) -> Result<()> {
@@ -55,7 +56,7 @@ pub fn mp4_to_gif(
         let mut index = 0usize;
         let mut first: Option<f64> = None;
         let mut next_pts = 0.0f64;
-        crate::decode::for_each_frame(&src, Some(crop), |f| {
+        let on_frame = |f: crate::decode::Frame| {
             if prog.cancel.load(Ordering::Relaxed) {
                 return Ok(false);
             }
@@ -76,7 +77,11 @@ pub fn mp4_to_gif(
             next_pts = pts + step;
             prog.frames_in.fetch_add(1, Ordering::Relaxed);
             Ok(true)
-        })?;
+        };
+        match trim {
+            Some(range) => crate::decode::for_each_frame_trimmed(&src, Some(crop), range, on_frame)?,
+            None => crate::decode::for_each_frame(&src, Some(crop), on_frame)?,
+        }
         // Dropping the collector tells the writer there are no more frames.
         drop(collector);
         Ok(())
