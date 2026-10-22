@@ -376,12 +376,12 @@ impl SettingsApp {
                     if checking { "Looking up your username…" } else { "Your imgur.com session is active." },
                 ),
                 _ if checking => (WEAK, "Checking session…".into(), "Looking for a saved imgur.com sign-in."),
-                Auth::SignedOut => (WEAK, "Signed out".into(), "Sign in to upload to your Imgur account."),
+                Auth::SignedOut => (RED, "Signed out".into(), "Sign in to upload to your Imgur account."),
                 Auth::Unknown => (WEAK, "Status unknown".into(), "The session couldn't be checked."),
             };
             ui.horizontal(|ui| {
                 ui.set_min_height(44.0);
-                status_dot(ui, dot, self.auth == Auth::SignedIn);
+                status_dot(ui, dot, dot != WEAK);
                 ui.add_space(4.0);
                 label_block(ui, &title, sub);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| match op {
