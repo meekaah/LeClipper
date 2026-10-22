@@ -6,6 +6,7 @@ mod decode;
 mod gif;
 mod hdr;
 mod icon;
+mod imgur_web;
 mod mp4enc;
 mod overlay;
 mod preview;
@@ -76,6 +77,32 @@ fn selftest(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `screen2imgur imgur upload <file> | signin | signout`: runs an Imgur job without the UI
+/// and prints its events (visible in debug builds, which have a console).
+fn imgur_cli(args: &[String]) -> anyhow::Result<()> {
+    use imgur_web::{Event, Task};
+    let task = match (args.first().map(String::as_str), args.get(1)) {
+        (Some("upload"), Some(f)) => Task::Upload(PathBuf::from(f)),
+        (Some("signin"), _) => Task::SignIn,
+        (Some("signout"), _) => Task::SignOut,
+        _ => anyhow::bail!("usage: screen2imgur imgur upload <file> | signin | signout"),
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _job = imgur_web::start(task, tx, || {});
+    for ev in rx {
+        match ev {
+            Event::Status(s) => println!("{s}"),
+            Event::Progress(p) => println!("{:.0}%", p * 100.0),
+            Event::Done(s) => {
+                println!("done: {s}");
+                return Ok(());
+            }
+            Event::Failed(e) => anyhow::bail!(e),
+        }
+    }
+    Ok(())
+}
+
 fn main() {
     std::panic::set_hook(Box::new(|info| log(&format!("panic: {info}"))));
 
@@ -95,6 +122,7 @@ fn main() {
             }
         }
         Some("selftest") => selftest(&args[1..]),
+        Some("imgur") => imgur_cli(&args[1..]),
         _ => tray::run(),
     };
     if let Err(e) = result {

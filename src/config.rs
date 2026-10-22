@@ -6,11 +6,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DefaultAction {
-    /// Show the popup and wait for the user. ("upload" was removed with the Imgur API.)
-    #[serde(alias = "upload")]
+    /// Show the popup and wait for the user.
     Ask,
     SaveMp4,
     SaveGif,
+    /// Upload the MP4 to Imgur through the website (see `imgur_web`).
+    Upload,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

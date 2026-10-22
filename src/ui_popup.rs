@@ -63,6 +63,13 @@ struct Job {
     rx: Receiver<JobDone>,
 }
 
+struct Upload {
+    job: crate::imgur_web::Job,
+    rx: Receiver<crate::imgur_web::Event>,
+    status: String,
+    progress: Option<f32>,
+}
+
 struct Popup {
     args: Args,
     cfg: Config,
@@ -71,6 +78,9 @@ struct Popup {
     drag_format: DragFormat,
     job: Option<Job>,
     saved: Vec<PathBuf>,
+    upload: Option<Upload>,
+    /// Imgur post link once uploaded.
+    link: Option<String>,
     message: Option<(String, bool)>,
     confirm_discard: bool,
     ran_default: bool,
@@ -93,6 +103,8 @@ impl Popup {
             preview,
             job: None,
             saved: Vec::new(),
+            upload: None,
+            link: None,
             message: None,
             confirm_discard: false,
             ran_default: false,
@@ -204,6 +216,44 @@ impl Popup {
         }
     }
 
+    /// Uploads the recording (always the MP4) to Imgur in a hidden browser window.
+    fn start_upload(&mut self, ctx: &egui::Context) {
+        if self.upload.is_some() || self.link.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let wake = ctx.clone();
+        let job = crate::imgur_web::start(crate::imgur_web::Task::Upload(self.args.path.clone()), tx, move || {
+            wake.request_repaint()
+        });
+        self.message = None;
+        self.upload = Some(Upload { job, rx, status: "Starting…".into(), progress: None });
+    }
+
+    fn poll_upload(&mut self, ctx: &egui::Context) {
+        use crate::imgur_web::Event;
+        let Some(up) = &mut self.upload else { return };
+        while let Ok(ev) = up.rx.try_recv() {
+            match ev {
+                Event::Status(s) => up.status = s,
+                Event::Progress(p) => up.progress = Some(p),
+                Event::Done(link) => {
+                    ctx.copy_text(link.clone());
+                    self.message = Some(("Uploaded. Link copied to the clipboard.".into(), false));
+                    self.link = Some(link);
+                    self.upload = None;
+                    return;
+                }
+                Event::Failed(e) => {
+                    let msg = if e == "cancelled" { "Upload cancelled.".into() } else { format!("Upload failed: {e}") };
+                    self.message = Some((msg, e != "cancelled"));
+                    self.upload = None;
+                    return;
+                }
+            }
+        }
+    }
+
     fn poll(&mut self) {
         let Some(job) = &self.job else { return };
         let Ok(done) = job.rx.try_recv() else { return };
@@ -241,6 +291,7 @@ impl Popup {
 impl eframe::App for Popup {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
+        self.poll_upload(ctx);
         if self.job.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -251,13 +302,15 @@ impl eframe::App for Popup {
                 DefaultAction::Ask => {}
                 DefaultAction::SaveMp4 => self.save_mp4(ctx),
                 DefaultAction::SaveGif => self.save_gif(ctx),
+                DefaultAction::Upload => self.start_upload(ctx),
             }
         }
 
-        // Ask before throwing away a recording that was never saved.
+        // Ask before throwing away a recording that was never saved or uploaded.
         if ctx.input(|i| i.viewport().close_requested()) {
-            let nothing_done = self.saved.is_empty();
-            if (nothing_done || self.job.is_some()) && !self.confirm_discard {
+            let nothing_done = self.saved.is_empty() && self.link.is_none();
+            let busy = self.job.is_some() || self.upload.is_some();
+            if (nothing_done || busy) && !self.confirm_discard {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.confirm_discard = true;
             }
@@ -330,7 +383,20 @@ impl eframe::App for Popup {
                     self.save_gif(ctx);
                 }
                 ui.separator();
-                if ui.button("🌐 Open Imgur upload").clicked() {
+                let can_upload = self.upload.is_none() && self.link.is_none();
+                if ui
+                    .add_enabled(can_upload, egui::Button::new("⬆ Upload to Imgur"))
+                    .on_hover_text("Uploads the MP4 to your Imgur account and copies the link")
+                    .clicked()
+                {
+                    self.start_upload(ctx);
+                }
+                ui.separator();
+                if ui
+                    .button("🌐 Open Imgur")
+                    .on_hover_text("Opens imgur.com/upload in your browser, to drag the preview onto")
+                    .clicked()
+                {
                     let _ = open::that(IMGUR_UPLOAD_URL);
                     self.message = Some(("Drag the preview onto the Imgur page to upload it.".into(), false));
                 }
@@ -349,6 +415,37 @@ impl eframe::App for Popup {
             if let Some(job) = &self.job {
                 ui.add_space(4.0);
                 self.progress_ui(ui, job);
+            }
+
+            if let Some(up) = &self.upload {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let width = ui.available_width() - 80.0;
+                    match up.progress {
+                        Some(p) if p < 1.0 => ui.add(
+                            egui::ProgressBar::new(p)
+                                .text(format!("Uploading… {:.0}%", p * 100.0))
+                                .desired_width(width),
+                        ),
+                        _ => ui.add(egui::ProgressBar::new(0.0).animate(true).text(&up.status).desired_width(width)),
+                    };
+                    if ui.button("Cancel").clicked() {
+                        up.job.cancel();
+                    }
+                });
+                if up.progress.is_some_and(|p| p < 1.0) {
+                    ui.weak(&up.status);
+                }
+            }
+
+            if let Some(link) = self.link.clone() {
+                ui.horizontal(|ui| {
+                    ui.hyperlink(&link);
+                    if ui.small_button("Copy").clicked() {
+                        ctx.copy_text(link.clone());
+                        self.message = Some(("Link copied.".into(), false));
+                    }
+                });
             }
 
             for p in self.saved.clone() {
@@ -372,7 +469,9 @@ impl eframe::App for Popup {
             if self.confirm_discard {
                 ui.add_space(8.0);
                 ui.group(|ui| {
-                    ui.label(if self.job.is_some() {
+                    ui.label(if self.upload.is_some() {
+                        "The Imgur upload is still running. Close anyway?"
+                    } else if self.job.is_some() {
                         "A GIF export is still running. Close anyway?"
                     } else {
                         "This recording hasn't been saved. Discard it?"
@@ -381,6 +480,9 @@ impl eframe::App for Popup {
                         if ui.button("Discard").clicked() {
                             if let Some(j) = &self.job {
                                 j.progress.gif.cancel.store(true, Ordering::Relaxed);
+                            }
+                            if let Some(up) = &self.upload {
+                                up.job.cancel();
                             }
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }

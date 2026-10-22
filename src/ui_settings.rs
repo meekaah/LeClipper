@@ -1,6 +1,7 @@
 //! Settings window (runs as `screen2imgur.exe settings`).
 
 use std::str::FromStr;
+use std::sync::mpsc::{self, Receiver};
 
 use anyhow::{anyhow, Result};
 use eframe::egui;
@@ -27,6 +28,9 @@ pub fn run() -> Result<()> {
 struct SettingsApp {
     cfg: Config,
     status: Option<(String, bool)>,
+    /// A running Imgur sign-in/sign-out and what it last reported.
+    imgur: Option<(crate::imgur_web::Job, Receiver<crate::imgur_web::Event>)>,
+    imgur_status: Option<(String, bool)>,
 }
 
 impl SettingsApp {
@@ -34,6 +38,36 @@ impl SettingsApp {
         Self {
             cfg: Config::load(),
             status: None,
+            imgur: None,
+            imgur_status: None,
+        }
+    }
+
+    fn imgur_task(&mut self, ctx: &egui::Context, task: crate::imgur_web::Task) {
+        let (tx, rx) = mpsc::channel();
+        let wake = ctx.clone();
+        let job = crate::imgur_web::start(task, tx, move || wake.request_repaint());
+        self.imgur = Some((job, rx));
+    }
+
+    fn poll_imgur(&mut self) {
+        use crate::imgur_web::Event;
+        let Some((_, rx)) = &self.imgur else { return };
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                Event::Status(s) => self.imgur_status = Some((s, false)),
+                Event::Progress(_) => {}
+                Event::Done(s) => {
+                    self.imgur_status = Some((s, false));
+                    self.imgur = None;
+                    return;
+                }
+                Event::Failed(e) => {
+                    self.imgur_status = Some((if e == "cancelled" { "Sign-in cancelled.".into() } else { e }, true));
+                    self.imgur = None;
+                    return;
+                }
+            }
         }
     }
 
@@ -52,6 +86,7 @@ impl SettingsApp {
 
 impl eframe::App for SettingsApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_imgur();
         egui::TopBottomPanel::bottom("buttons").show(ctx, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -114,7 +149,7 @@ impl eframe::App for SettingsApp {
                     egui::ComboBox::from_id_salt("default_action")
                         .selected_text(action_label(self.cfg.default_action))
                         .show_ui(ui, |ui| {
-                            for a in [DefaultAction::Ask, DefaultAction::SaveMp4, DefaultAction::SaveGif] {
+                            for a in [DefaultAction::Ask, DefaultAction::SaveMp4, DefaultAction::SaveGif, DefaultAction::Upload] {
                                 ui.selectable_value(&mut self.cfg.default_action, a, action_label(a));
                             }
                         });
@@ -162,6 +197,29 @@ impl eframe::App for SettingsApp {
                 });
 
                 ui.add_space(12.0);
+                ui.heading("Imgur");
+                ui.horizontal(|ui| {
+                    let idle = self.imgur.is_none();
+                    if ui.add_enabled(idle, egui::Button::new("Sign in…")).clicked() {
+                        self.imgur_task(ctx, crate::imgur_web::Task::SignIn);
+                    }
+                    if ui.add_enabled(idle, egui::Button::new("Sign out")).clicked() {
+                        self.imgur_task(ctx, crate::imgur_web::Task::SignOut);
+                    }
+                    if let Some((job, _)) = &self.imgur {
+                        ui.spinner();
+                        if ui.button("Cancel").clicked() {
+                            job.cancel();
+                        }
+                    }
+                });
+                if let Some((msg, err)) = &self.imgur_status {
+                    let color = if *err { egui::Color32::from_rgb(230, 80, 70) } else { ui.visuals().weak_text_color() };
+                    ui.colored_label(color, msg);
+                }
+                ui.weak("Uploads go through imgur.com in a built-in browser window that keeps you signed in. If you're signed out when uploading, that window opens so you can sign in first.");
+
+                ui.add_space(12.0);
                 ui.heading("Drag & drop");
                 egui::Grid::new("drag").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                     ui.label("Drag out");
@@ -182,5 +240,6 @@ pub fn action_label(a: DefaultAction) -> &'static str {
         DefaultAction::Ask => "Ask (show the popup)",
         DefaultAction::SaveMp4 => "Save MP4",
         DefaultAction::SaveGif => "Save GIF",
+        DefaultAction::Upload => "Upload to Imgur",
     }
 }
