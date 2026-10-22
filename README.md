@@ -2,6 +2,8 @@
 
 Windows tray app that records a region of the screen to MP4 (hardware H.264, up to 60 fps) and saves it as MP4/GIF or uploads it to Imgur. You can also drag the preview straight onto the Imgur upload page, Discord, a folder, …. See [SPEC.md](SPEC.md) for the design decisions.
 
+https://github.com/user-attachments/assets/d851c626-7c8f-4958-9fe2-f49e86532298
+
 ## Build
 
 ```bash
