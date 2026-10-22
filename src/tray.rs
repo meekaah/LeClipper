@@ -52,8 +52,6 @@ struct App {
     hotkey: Option<HotKey>,
     state: State,
     settings_open: bool,
-    /// The region last used (or adjusted then cancelled); offered again on the next record.
-    last_region: Option<Region>,
 }
 
 thread_local! {
@@ -146,7 +144,6 @@ pub fn run() -> Result<()> {
             hotkey: None,
             state: State::Idle,
             settings_open: false,
-            last_region: None,
         };
         app.register_hotkey();
         APP.with(|a| *a.borrow_mut() = Some(app));
@@ -289,10 +286,9 @@ impl App {
 
     fn toggle(&mut self) {
         match &self.state {
-            State::Idle => match self.last_region.as_ref().and_then(overlay::revalidate) {
-                Some(r) => self.arm(r),
-                None => self.select(),
-            },
+            // Every new recording starts with a fresh drag: the selector posts the
+            // region on mouse-up, which arms it (green, live) and waits for Record.
+            State::Idle => self.select(),
             State::Selecting(h) => unsafe {
                 // The selector posts a cancelled WM_APP_SELECTED when destroyed.
                 let _ = DestroyWindow(*h);
@@ -310,7 +306,7 @@ impl App {
         }
     }
 
-    /// Drops the remembered region and lets the user drag a new one.
+    /// Cancels any armed region and lets the user drag a new one.
     fn reselect(&mut self) {
         match self.state {
             State::Idle => self.select(),
@@ -337,7 +333,6 @@ impl App {
 
     fn disarm(&mut self) {
         if let State::Armed(ui) = std::mem::replace(&mut self.state, State::Idle) {
-            self.last_region = ui.region().or(self.last_region);
             ui.close();
             self.set_record_label();
         }
@@ -348,7 +343,6 @@ impl App {
             return;
         };
         let region = ui.region();
-        self.last_region = region.or(self.last_region);
         ui.close();
         self.set_record_label();
         if let Some(r) = region {

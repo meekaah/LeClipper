@@ -242,15 +242,6 @@ fn monitor_of(r: &RECT, flags: MONITOR_FROM_FLAGS) -> Option<(HMONITOR, RECT)> {
     }
 }
 
-/// Re-checks a previously used region against the current monitor layout: `None` if it is no
-/// longer entirely on one monitor, else the region with fresh monitor info.
-pub fn revalidate(region: &Region) -> Option<Region> {
-    let r = region_rect(region);
-    let (mon, mr) = monitor_of(&r, MONITOR_DEFAULTTONULL)?;
-    let inside = r.left >= mr.left && r.top >= mr.top && r.right <= mr.right && r.bottom <= mr.bottom;
-    inside.then(|| fit_region(mon, mr, r))
-}
-
 fn region_rect(r: &Region) -> RECT {
     RECT { left: r.x, top: r.y, right: r.x + r.w as i32, bottom: r.y + r.h as i32 }
 }
