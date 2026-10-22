@@ -69,6 +69,20 @@ impl Job {
             }
         }
     }
+
+    /// Raises the browser window if it's showing (e.g. for sign-in); a hidden one stays hidden.
+    pub fn bring_to_front(&self) {
+        let h = self.hwnd.load(Ordering::Relaxed);
+        if h != 0 {
+            unsafe {
+                let hwnd = HWND(h as *mut _);
+                if IsWindowVisible(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                    let _ = SetForegroundWindow(hwnd);
+                }
+            }
+        }
+    }
 }
 
 /// Starts `task` on a new thread. `wake` is called after every event (e.g. to repaint the UI).

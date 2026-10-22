@@ -109,7 +109,7 @@ struct SettingsApp {
 
 impl SettingsApp {
     fn new(cc: &eframe::CreationContext) -> Self {
-        style_window(cc);
+        style_window(cc, SIDEBAR);
         install_fonts(&cc.egui_ctx);
         apply_style(&cc.egui_ctx);
         let size = crate::icon::SIZE as usize;
@@ -615,16 +615,16 @@ fn hotkey_from(key: egui::Key, mods: egui::Modifiers) -> Result<String, String> 
 
 // ---- Look ----
 
-fn icons() -> FontFamily {
+pub(crate) fn icons() -> FontFamily {
     FontFamily::Name("icons".into())
 }
 
-fn semibold() -> FontFamily {
+pub(crate) fn semibold() -> FontFamily {
     FontFamily::Name("semibold".into())
 }
 
 /// Segoe UI for text and the system icon font for glyphs, when Windows has them.
-fn install_fonts(ctx: &egui::Context) {
+pub(crate) fn install_fonts(ctx: &egui::Context) {
     let dir = std::path::PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())).join("Fonts");
     let load = |names: &[&str]| names.iter().find_map(|n| std::fs::read(dir.join(n)).ok());
     let mut fonts = egui::FontDefinitions::default();
@@ -703,8 +703,8 @@ fn apply_style(ctx: &egui::Context) {
     });
 }
 
-/// Dark title bar in the sidebar's color, with a faint accent border (Windows 11).
-fn style_window(cc: &eframe::CreationContext) {
+/// Dark title bar in `caption`, with a faint accent border (Windows 11).
+pub(crate) fn style_window(cc: &eframe::CreationContext, caption: Color32) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Dwm::*;
@@ -717,12 +717,12 @@ fn style_window(cc: &eframe::CreationContext) {
     };
     set(DWMWA_USE_IMMERSIVE_DARK_MODE, 1);
     set(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND.0 as u32);
-    set(DWMWA_CAPTION_COLOR, colorref(SIDEBAR));
+    set(DWMWA_CAPTION_COLOR, colorref(caption));
     set(DWMWA_TEXT_COLOR, colorref(TEXT));
     set(DWMWA_BORDER_COLOR, colorref(Color32::from_rgb(52, 72, 118)));
 }
 
-fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+pub(crate) fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
     Color32::from_rgba_premultiplied(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()), l(a.a(), b.a()))
 }
@@ -831,7 +831,7 @@ enum Kind {
 /// Where to paint a one-line galley so its visible glyphs, cap top to baseline, sit centered on `center`.
 /// Centering the galley's box puts Segoe UI text low, because its line box has more room above the caps
 /// than below the baseline.
-fn centered_galley_pos(galley: &egui::Galley, center: Pos2) -> Pos2 {
+pub(crate) fn centered_galley_pos(galley: &egui::Galley, center: Pos2) -> Pos2 {
     let ink = galley.rows.first().and_then(|row| {
         let glyphs = row.glyphs.iter().filter(|g| !g.uv_rect.is_nothing());
         let top = glyphs.map(|g| g.pos.y + g.uv_rect.offset.y).reduce(f32::min)?;
