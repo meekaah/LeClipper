@@ -19,7 +19,7 @@ mod ui_settings;
 use std::io::Write;
 use std::path::PathBuf;
 
-/// Appends a line to `%APPDATA%\screen2imgur\log.txt` (and stderr in debug builds).
+/// Appends a line to `%APPDATA%\LeClipper\log.txt` (and stderr in debug builds).
 pub fn log(msg: &str) {
     let line = format!("{} [{}] {msg}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), std::process::id());
     #[cfg(debug_assertions)]
@@ -30,7 +30,7 @@ pub fn log(msg: &str) {
     }
 }
 
-/// `screen2imgur selftest [secs] [w] [h]`: records the top-left of the primary monitor
+/// `leclipper selftest [secs] [w] [h]`: records the top-left of the primary monitor
 /// with the current settings, then converts it to GIF. Writes both next to the exe's cwd.
 fn selftest(args: &[String]) -> anyhow::Result<()> {
     use windows::Win32::Foundation::POINT;
@@ -78,7 +78,7 @@ fn selftest(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `screen2imgur imgur upload <file> | signin | signout`: runs an Imgur job without the UI
+/// `leclipper imgur upload <file> | signin | signout`: runs an Imgur job without the UI
 /// and prints its events (visible in debug builds, which have a console).
 fn imgur_cli(args: &[String]) -> anyhow::Result<()> {
     use imgur_web::{Event, Task};
@@ -86,7 +86,7 @@ fn imgur_cli(args: &[String]) -> anyhow::Result<()> {
         (Some("upload"), Some(f)) => Task::Upload(PathBuf::from(f)),
         (Some("signin"), _) => Task::SignIn,
         (Some("signout"), _) => Task::SignOut,
-        _ => anyhow::bail!("usage: screen2imgur imgur upload <file> | signin | signout"),
+        _ => anyhow::bail!("usage: leclipper imgur upload <file> | signin | signout"),
     };
     let (tx, rx) = std::sync::mpsc::channel();
     let _job = imgur_web::start(task, tx, || {});
@@ -120,7 +120,7 @@ fn main() {
                     height: parse(3) as u32,
                     duration_ms: parse(4),
                 }),
-                None => Err(anyhow::anyhow!("usage: screen2imgur popup <file.mp4> <w> <h> <duration_ms>")),
+                None => Err(anyhow::anyhow!("usage: leclipper popup <file.mp4> <w> <h> <duration_ms>")),
             }
         }
         Some("selftest") => selftest(&args[1..]),

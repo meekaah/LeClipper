@@ -2,7 +2,7 @@
 //! A WebView2 (the Edge engine that ships with Windows) loads imgur.com/upload in a hidden
 //! window and gets the file put into the page's file input over the DevTools protocol, so
 //! Imgur sees an ordinary upload from a signed-in browser. The profile lives in
-//! `%APPDATA%\screen2imgur\webview`, which keeps the Imgur sign-in between runs. When
+//! `%APPDATA%\LeClipper\webview`, which keeps the Imgur sign-in between runs. When
 //! there's no sign-in (or Imgur wants something from the user), the window is shown.
 //!
 //! Each job runs on its own thread with its own message loop and reports through `Event`s.
@@ -145,7 +145,7 @@ fn run(task: Task, hwnd_out: &AtomicIsize, send: &dyn Fn(Event)) -> Result<Strin
 /// Picks the signed-in username out of the page's own api.imgur.com responses (the site
 /// asks for the current account as it loads).
 const ACCOUNT_HOOK: &str = r#"(() => {
-  const st = window.__s2iUser = { name: null, urls: [] };
+  const st = window.__lcUser = { name: null, urls: [] };
   const look = (u, body) => {
     u = String(u);
     if (!/api\.imgur\.com/.test(u)) return;
@@ -173,13 +173,13 @@ const ACCOUNT_HOOK: &str = r#"(() => {
 
 /// The signed-in username, if imgur.com reveals it within a few seconds.
 fn account_name(b: &Browser) -> Option<String> {
-    let name = || b.exec("window.__s2iUser && window.__s2iUser.name").ok().and_then(|v| v.as_str().map(str::to_owned));
+    let name = || b.exec("window.__lcUser && window.__lcUser.name").ok().and_then(|v| v.as_str().map(str::to_owned));
     if name().is_none() {
         b.navigate(COOKIE_URL).ok()?;
     }
     let found = b.wait_until(Duration::from_secs(20), || Ok(name())).ok();
     if found.is_none() {
-        let urls = b.exec("window.__s2iUser && window.__s2iUser.urls").unwrap_or_default();
+        let urls = b.exec("window.__lcUser && window.__lcUser.urls").unwrap_or_default();
         crate::log(&format!("imgur: no username among the page's requests: {urls}"));
     }
     found
@@ -201,7 +201,7 @@ fn sign_in(b: &Browser, send: &dyn Fn(Event)) -> Result<()> {
 /// flight. Signed in, the page creates the post (and moves to `/a/<id>`) *before*
 /// uploading, so the URL doesn't mean it's done. The request trail is kept for the log.
 const UPLOAD_HOOK: &str = r#"(() => {
-  const st = window.__s2i = { started: false, loaded: 0, total: 0, uploaded: false, media: null, added: false, pending: 0, error: null, log: [] };
+  const st = window.__lc = { started: false, loaded: 0, total: 0, uploaded: false, media: null, added: false, pending: 0, error: null, log: [] };
   const api = u => /api\.imgur\.com/.test(String(u));
   const done = (m, u, s, b) => {
     st.pending--;
@@ -221,11 +221,11 @@ const UPLOAD_HOOK: &str = r#"(() => {
   };
   const open = XMLHttpRequest.prototype.open, send = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.open = function (m, u) {
-    this.__s2i = { m: String(m).toUpperCase(), u, upload: /\/3\/upload(\?|$)/.test(String(u)) };
+    this.__lc = { m: String(m).toUpperCase(), u, upload: /\/3\/upload(\?|$)/.test(String(u)) };
     return open.apply(this, arguments);
   };
   XMLHttpRequest.prototype.send = function () {
-    const x = this.__s2i;
+    const x = this.__lc;
     if (x && api(x.u)) {
       st.pending++;
       this.addEventListener('loadend', () => done(x.m, x.u, this.status, this.responseText));
@@ -249,7 +249,7 @@ const UPLOAD_HOOK: &str = r#"(() => {
   };
 })();"#;
 
-const UPLOAD_STATE: &str = "({ input: !!document.getElementById('file-input'), s: window.__s2i || null })";
+const UPLOAD_STATE: &str = "({ input: !!document.getElementById('file-input'), s: window.__lc || null })";
 
 fn upload(b: &Browser, path: &std::path::Path, send: &dyn Fn(Event)) -> Result<String> {
     let path = std::path::absolute(path)?;
@@ -321,7 +321,7 @@ fn upload(b: &Browser, path: &std::path::Path, send: &dyn Fn(Event)) -> Result<S
         Ok(s["media"].as_str().and_then(gifv_link).filter(|_| idle_polls >= 2))
     });
     if result.is_err() {
-        if let Some(log) = b.exec("window.__s2i && window.__s2i.log").ok().as_ref().and_then(Value::as_array) {
+        if let Some(log) = b.exec("window.__lc && window.__lc.log").ok().as_ref().and_then(Value::as_array) {
             for l in log {
                 crate::log(&format!("imgur request: {}", l.as_str().unwrap_or_default()));
             }
@@ -373,7 +373,7 @@ impl Browser {
                 lpfnWndProc: Some(wndproc),
                 hInstance: hinstance,
                 hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-                lpszClassName: w!("s2i_imgur"),
+                lpszClassName: w!("lc_imgur"),
                 ..Default::default()
             };
             RegisterClassExW(&wc);
@@ -382,8 +382,8 @@ impl Browser {
         let hwnd = unsafe {
             CreateWindowExW(
                 WS_EX_APPWINDOW,
-                w!("s2i_imgur"),
-                w!("Imgur — screen2imgur"),
+                w!("lc_imgur"),
+                w!("Imgur — LeClipper"),
                 WS_OVERLAPPEDWINDOW,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,

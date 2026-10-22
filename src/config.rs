@@ -50,7 +50,7 @@ impl Default for Config {
         let output_dir = directories::UserDirs::new()
             .and_then(|u| u.video_dir().map(|p| p.to_path_buf()))
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("screen2imgur");
+            .join("LeClipper");
         Self {
             hotkey: "Ctrl+Shift+R".into(),
             capture_cursor: true,
@@ -70,7 +70,7 @@ pub fn app_dir() -> PathBuf {
     directories::BaseDirs::new()
         .map(|b| b.config_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("screen2imgur")
+        .join("LeClipper")
 }
 
 pub fn config_path() -> PathBuf {
@@ -78,7 +78,7 @@ pub fn config_path() -> PathBuf {
 }
 
 pub fn temp_dir() -> PathBuf {
-    std::env::temp_dir().join("screen2imgur")
+    std::env::temp_dir().join("LeClipper")
 }
 
 impl Config {

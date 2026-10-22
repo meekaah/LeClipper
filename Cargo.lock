@@ -2121,6 +2121,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
+name = "leclipper"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "directories",
+ "eframe",
+ "gifski",
+ "global-hotkey",
+ "imgref",
+ "open",
+ "raw-window-handle",
+ "rfd",
+ "rgb",
+ "serde",
+ "serde_json",
+ "toml",
+ "tray-icon",
+ "webview2-com",
+ "windows 0.61.3",
+]
+
+[[package]]
 name = "libappindicator"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3328,29 +3351,6 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
-
-[[package]]
-name = "screen2imgur"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "directories",
- "eframe",
- "gifski",
- "global-hotkey",
- "imgref",
- "open",
- "raw-window-handle",
- "rfd",
- "rgb",
- "serde",
- "serde_json",
- "toml",
- "tray-icon",
- "webview2-com",
- "windows 0.61.3",
-]
 
 [[package]]
 name = "sctk-adwaita"

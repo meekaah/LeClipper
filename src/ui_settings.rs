@@ -1,4 +1,4 @@
-//! Settings window (runs as `screen2imgur.exe settings`).
+//! Settings window (runs as `leclipper.exe settings`).
 //!
 //! A sidebar of tabs next to a scrolling column of cards. Every change is written to
 //! config.toml shortly after it's made (debounced so sliders and typing don't hammer the
@@ -25,14 +25,14 @@ pub fn app_icon() -> egui::IconData {
 pub fn run() -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("screen2imgur settings")
+            .with_title("LeClipper settings")
             .with_inner_size([900.0, 760.0])
             .with_min_inner_size([680.0, 460.0])
             .with_icon(app_icon()),
         centered: true,
         ..Default::default()
     };
-    eframe::run_native("screen2imgur settings", options, Box::new(|cc| Ok(Box::new(SettingsApp::new(cc)))))
+    eframe::run_native("LeClipper settings", options, Box::new(|cc| Ok(Box::new(SettingsApp::new(cc)))))
         .map_err(|e| anyhow!("{e}"))
 }
 
@@ -246,7 +246,7 @@ impl SettingsApp {
             ui.add_space(4.0);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                ui.label(RichText::new("screen2imgur").family(semibold()).size(15.0).color(TEXT));
+                ui.label(RichText::new("LeClipper").family(semibold()).size(15.0).color(TEXT));
                 ui.label(RichText::new("settings").size(12.0).color(WEAK));
             });
         });

@@ -9,7 +9,7 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::JobObjects::*;
 use windows::Win32::System::Threading::{CreateMutexW, OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
 
-const UPLOADING: PCWSTR = w!("Local\\screen2imgur-uploading");
+const UPLOADING: PCWSTR = w!("Local\\LeClipper-uploading");
 
 struct Job(HANDLE);
 // The handle is only used for AssignProcessToJobObject, which is thread-safe.

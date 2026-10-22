@@ -68,7 +68,7 @@ fn message_box(text: &str, error: bool) {
     let t = HSTRING::from(text);
     let flags = if error { MB_ICONERROR } else { MB_ICONINFORMATION };
     unsafe {
-        MessageBoxW(None, PCWSTR(t.as_ptr()), w!("screen2imgur"), flags | MB_OK | MB_SETFOREGROUND);
+        MessageBoxW(None, PCWSTR(t.as_ptr()), w!("LeClipper"), flags | MB_OK | MB_SETFOREGROUND);
     }
 }
 
@@ -77,7 +77,7 @@ fn confirm_quit_during_upload() -> bool {
         MessageBoxW(
             None,
             w!("An Imgur upload is still running. Quitting will cancel it.\n\nQuit anyway?"),
-            w!("screen2imgur"),
+            w!("LeClipper"),
             MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2 | MB_SETFOREGROUND,
         )
     };
@@ -87,15 +87,15 @@ fn confirm_quit_during_upload() -> bool {
 pub fn run() -> Result<()> {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        let _mutex = CreateMutexW(None, true, w!("Local\\screen2imgur-tray"))?;
+        let _mutex = CreateMutexW(None, true, w!("Local\\LeClipper-tray"))?;
         if GetLastError() == ERROR_ALREADY_EXISTS {
-            message_box("screen2imgur is already running (look for it in the tray).", false);
+            message_box("LeClipper is already running (look for it in the tray).", false);
             return Ok(());
         }
 
         clean_stale_temp_files();
 
-        let class = w!("s2i_main");
+        let class = w!("lc_main");
         let wc = WNDCLASSW {
             lpfnWndProc: Some(main_proc),
             lpszClassName: class,
@@ -105,7 +105,7 @@ pub fn run() -> Result<()> {
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             class,
-            w!("screen2imgur"),
+            w!("LeClipper"),
             WINDOW_STYLE::default(),
             0, 0, 0, 0,
             Some(HWND_MESSAGE), None, None, None,
@@ -139,7 +139,7 @@ pub fn run() -> Result<()> {
 
         let tray = TrayIconBuilder::new()
             .with_icon(icon(false))
-            .with_tooltip("screen2imgur")
+            .with_tooltip("LeClipper")
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
             .build()
@@ -387,7 +387,7 @@ impl App {
 
     fn set_recording_look(&self, on: bool) {
         let _ = self.tray.set_icon(Some(icon(on)));
-        let _ = self.tray.set_tooltip(Some(if on { "screen2imgur — recording" } else { "screen2imgur" }));
+        let _ = self.tray.set_tooltip(Some(if on { "LeClipper — recording" } else { "LeClipper" }));
         if on {
             self.menus.record.set_text(match &self.hotkey {
                 Some(_) => format!("Stop recording\t{}", self.cfg.hotkey),

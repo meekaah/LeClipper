@@ -101,7 +101,7 @@ struct Selector {
 /// Freezes the screen and lets the user drag a rectangle. Posts `WM_APP_SELECTED` to `notify`.
 pub fn select_region(notify: HWND) -> windows::core::Result<HWND> {
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| register(w!("s2i_selector"), Some(selector_proc), IDC_CROSS));
+    ONCE.call_once(|| register(w!("lc_selector"), Some(selector_proc), IDC_CROSS));
 
     unsafe {
         let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
@@ -159,8 +159,8 @@ pub fn select_region(notify: HWND) -> windows::core::Result<HWND> {
 
         let hwnd = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-            w!("s2i_selector"),
-            w!("screen2imgur region"),
+            w!("lc_selector"),
+            w!("LeClipper region"),
             WS_POPUP,
             vx, vy, vw, vh,
             None, None, Some(hinstance()), None,
@@ -450,14 +450,14 @@ impl RecordingUi {
     pub fn show(region: &Region, notify: HWND) -> windows::core::Result<Self> {
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
-            register(w!("s2i_border"), Some(border_proc), IDC_ARROW);
-            register(w!("s2i_bar"), Some(bar_proc), IDC_ARROW);
+            register(w!("lc_border"), Some(border_proc), IDC_ARROW);
+            register(w!("lc_bar"), Some(bar_proc), IDC_ARROW);
         });
         unsafe {
             let border = CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
-                w!("s2i_border"),
-                w!("screen2imgur border"),
+                w!("lc_border"),
+                w!("LeClipper border"),
                 WS_POPUP,
                 region.x - BORDER,
                 region.y - BORDER,
@@ -471,8 +471,8 @@ impl RecordingUi {
 
             let bar = CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-                w!("s2i_bar"),
-                w!("screen2imgur recording"),
+                w!("lc_bar"),
+                w!("LeClipper recording"),
                 WS_POPUP,
                 0, 0, 10, 10,
                 None, None, Some(hinstance()), None,
@@ -681,8 +681,8 @@ impl ArmedUi {
     pub fn show(region: &Region, notify: HWND) -> windows::core::Result<Self> {
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
-            register(w!("s2i_frame"), Some(frame_proc), IDC_ARROW);
-            register(w!("s2i_armbar"), Some(armbar_proc), IDC_ARROW);
+            register(w!("lc_frame"), Some(frame_proc), IDC_ARROW);
+            register(w!("lc_armbar"), Some(armbar_proc), IDC_ARROW);
         });
         unsafe {
             let (mut dx, mut dy) = (96, 96);
@@ -691,16 +691,16 @@ impl ArmedUi {
 
             let frame = CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE,
-                w!("s2i_frame"),
-                w!("screen2imgur region"),
+                w!("lc_frame"),
+                w!("LeClipper region"),
                 WS_POPUP,
                 0, 0, 1, 1,
                 None, None, Some(hinstance()), None,
             )?;
             let bar = match CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-                w!("s2i_armbar"),
-                w!("screen2imgur ready"),
+                w!("lc_armbar"),
+                w!("LeClipper ready"),
                 WS_POPUP,
                 0, 0, 10, 10,
                 None, None, Some(hinstance()), None,

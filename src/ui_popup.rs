@@ -1,4 +1,4 @@
-//! Post-recording popup (runs as `screen2imgur.exe popup <file> <w> <h> <ms>`).
+//! Post-recording popup (runs as `leclipper.exe popup <file> <w> <h> <ms>`).
 //!
 //! Top to bottom: a header with the clip's details, the looping preview (click to pause,
 //! drag to drop the file anywhere), the action bar, and a scrolling stack of running jobs
@@ -89,7 +89,7 @@ pub fn run(args: Args) -> Result<()> {
     let preview_h = (preview_w * args.height.max(1) as f32 / args.width.max(1) as f32).min(args.height as f32);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("screen2imgur — recording")
+            .with_title("LeClipper — recording")
             .with_inner_size([WINDOW_W, preview_h.max(MIN_PREVIEW_H) + 147.0])
             .with_min_inner_size([440.0, 260.0])
             .with_always_on_top()
@@ -98,7 +98,7 @@ pub fn run(args: Args) -> Result<()> {
         ..Default::default()
     };
     let res = eframe::run_native(
-        "screen2imgur popup",
+        "LeClipper popup",
         options,
         Box::new(move |cc| Ok(Box::new(Popup::new(cc, args)))),
     )
@@ -185,7 +185,7 @@ impl Popup {
             args.duration_ms,
         );
         Self {
-            base_name: format!("screen2imgur_{}", chrono::Local::now().format("%Y-%m-%d_%H-%M-%S")),
+            base_name: format!("LeClipper_{}", chrono::Local::now().format("%Y-%m-%d_%H-%M-%S")),
             drag_format: cfg.drag_format,
             cfg,
             args,

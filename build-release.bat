@@ -8,7 +8,7 @@ echo.
 if errorlevel 1 (
     echo Build FAILED.
 ) else (
-    echo Build succeeded: %~dp0target\release\screen2imgur.exe
+    echo Build succeeded: %~dp0target\release\leclipper.exe
 )
 echo.
 pause
