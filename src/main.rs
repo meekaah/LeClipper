@@ -93,6 +93,7 @@ fn imgur_cli(args: &[String]) -> anyhow::Result<()> {
         match ev {
             Event::Status(s) => println!("{s}"),
             Event::Progress(p) => println!("{:.0}%", p * 100.0),
+            Event::Account(_) => {}
             Event::Done(s) => {
                 println!("done: {s}");
                 return Ok(());

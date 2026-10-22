@@ -21,7 +21,7 @@ pub enum DragFormat {
     Gif,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// e.g. "Ctrl+Shift+R"; parsed by global-hotkey.

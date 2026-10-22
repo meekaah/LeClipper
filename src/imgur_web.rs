@@ -36,12 +36,19 @@ pub enum Task {
     Upload(PathBuf),
     SignIn,
     SignOut,
+    /// Reports `SIGNED_IN` or `SIGNED_OUT` without showing the window.
+    Status,
 }
+
+pub const SIGNED_IN: &str = "Signed in to Imgur.";
+pub const SIGNED_OUT: &str = "Signed out of Imgur.";
 
 pub enum Event {
     Status(String),
     /// Upload progress, 0..=1.
     Progress(f32),
+    /// Sign-in/status: there's a session, and whose it is once the page has said.
+    Account(Option<String>),
     /// The video's `.gifv` link for an upload, or a message for sign-in/out.
     Done(String),
     Failed(String),
@@ -95,17 +102,72 @@ fn run(task: Task, hwnd_out: &AtomicIsize, send: &dyn Fn(Event)) -> Result<Strin
     match task {
         Task::Upload(path) => upload(&b, &path, send),
         Task::SignIn => {
-            if b.signed_in()? {
-                return Ok("Already signed in to Imgur.".into());
+            b.add_script(ACCOUNT_HOOK)?;
+            let already = b.signed_in()?;
+            if !already {
+                sign_in(&b, send)?;
             }
-            sign_in(&b, send)?;
-            Ok("Signed in to Imgur.".into())
+            send(Event::Account(None));
+            send(Event::Account(account_name(&b)));
+            Ok(if already { "Already signed in to Imgur.".into() } else { SIGNED_IN.into() })
         }
         Task::SignOut => {
             unsafe { b.webview.cast::<ICoreWebView2_2>()?.CookieManager()?.DeleteAllCookies()? };
-            Ok("Signed out of Imgur.".into())
+            Ok(SIGNED_OUT.into())
+        }
+        Task::Status => {
+            b.add_script(ACCOUNT_HOOK)?;
+            if !b.signed_in()? {
+                return Ok(SIGNED_OUT.into());
+            }
+            send(Event::Account(None));
+            send(Event::Account(account_name(&b)));
+            Ok(SIGNED_IN.into())
         }
     }
+}
+
+/// Picks the signed-in username out of the page's own api.imgur.com responses (the site
+/// asks for the current account as it loads).
+const ACCOUNT_HOOK: &str = r#"(() => {
+  const st = window.__s2iUser = { name: null, urls: [] };
+  const look = (u, body) => {
+    u = String(u);
+    if (!/api\.imgur\.com/.test(u)) return;
+    st.urls.push(u.replace(/\?.*/, ''));
+    if (st.name || !/\/me(\/|\?|$)/.test(u)) return;
+    try {
+      const j = JSON.parse(body), d = (j && j.data) || j;
+      const n = d && (d.username || d.url || (d.account && d.account.username));
+      if (n) st.name = String(n);
+    } catch (e) {}
+  };
+  const fetch0 = window.fetch;
+  window.fetch = async function (input) {
+    const r = await fetch0.apply(this, arguments);
+    const u = typeof input === 'string' ? input : input.url;
+    r.clone().text().then(b => look(u, b), () => {});
+    return r;
+  };
+  const open = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (m, u) {
+    this.addEventListener('load', () => { try { look(u, this.responseText); } catch (e) {} });
+    return open.apply(this, arguments);
+  };
+})();"#;
+
+/// The signed-in username, if imgur.com reveals it within a few seconds.
+fn account_name(b: &Browser) -> Option<String> {
+    let name = || b.exec("window.__s2iUser && window.__s2iUser.name").ok().and_then(|v| v.as_str().map(str::to_owned));
+    if name().is_none() {
+        b.navigate(COOKIE_URL).ok()?;
+    }
+    let found = b.wait_until(Duration::from_secs(20), || Ok(name())).ok();
+    if found.is_none() {
+        let urls = b.exec("window.__s2iUser && window.__s2iUser.urls").unwrap_or_default();
+        crate::log(&format!("imgur: no username among the page's requests: {urls}"));
+    }
+    found
 }
 
 /// Shows the window on the sign-in page and waits until Imgur sets its session cookie.

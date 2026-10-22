@@ -16,6 +16,7 @@ rfd = "0.15"
 tray-icon = "0.21"
 global-hotkey = "0.7"
 eframe = "0.32"
+raw-window-handle = "0.6"
 gifski = { version = "1", default-features = false }
 imgref = "1"
 rgb = "0.8"

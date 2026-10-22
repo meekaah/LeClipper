@@ -3341,6 +3341,7 @@ dependencies = [
  "global-hotkey",
  "imgref",
  "open",
+ "raw-window-handle",
  "rfd",
  "rgb",
  "serde",

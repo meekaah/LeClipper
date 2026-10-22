@@ -237,6 +237,7 @@ impl Popup {
             match ev {
                 Event::Status(s) => up.status = s,
                 Event::Progress(p) => up.progress = Some(p),
+                Event::Account(_) => {}
                 Event::Done(link) => {
                     ctx.copy_text(link.clone());
                     self.message = Some(("Uploaded. Link copied to the clipboard.".into(), false));
