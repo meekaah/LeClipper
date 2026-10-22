@@ -24,6 +24,7 @@ use webview2_com::{
 };
 use windows::core::{w, Interface, HSTRING, PWSTR};
 use windows::Win32::Foundation::*;
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -426,9 +427,24 @@ impl Browser {
         Ok(Self { hwnd, controller, webview })
     }
 
+    /// Shows the window centered on the monitor under the cursor, and topmost so it isn't
+    /// hidden behind the always-on-top "recording finished" popup.
     fn show(&self) {
         unsafe {
+            let mut wr = RECT::default();
+            let _ = GetWindowRect(self.hwnd, &mut wr);
+            let (w, h) = (wr.right - wr.left, wr.bottom - wr.top);
+            let mut cursor = POINT::default();
+            let _ = GetCursorPos(&mut cursor);
+            let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            let pos = if GetMonitorInfoW(MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool() {
+                let a = mi.rcWork;
+                (a.left + ((a.right - a.left) - w).max(0) / 2, a.top + ((a.bottom - a.top) - h).max(0) / 2)
+            } else {
+                (wr.left, wr.top)
+            };
             let _ = ShowWindow(self.hwnd, SW_SHOWNORMAL);
+            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), pos.0, pos.1, 0, 0, SWP_NOSIZE);
             let _ = SetForegroundWindow(self.hwnd);
         }
     }
