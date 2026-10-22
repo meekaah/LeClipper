@@ -42,7 +42,7 @@ pub enum Event {
     Status(String),
     /// Upload progress, 0..=1.
     Progress(f32),
-    /// The post link for an upload, or a message for sign-in/out.
+    /// The video's `.gifv` link for an upload, or a message for sign-in/out.
     Done(String),
     Failed(String),
 }
@@ -120,11 +120,11 @@ fn sign_in(b: &Browser, send: &dyn Fn(Event)) -> Result<()> {
 }
 
 /// Watches the page's own requests to api.imgur.com: progress and errors of the upload,
-/// whether the video got attached to the post, and what's still in flight. Signed in, the
-/// page creates the post (and moves to `/a/<id>`) *before* uploading, so the URL alone
-/// doesn't mean it's done. The request trail is kept for the log.
+/// the uploaded video's id, whether it got attached to the post, and what's still in
+/// flight. Signed in, the page creates the post (and moves to `/a/<id>`) *before*
+/// uploading, so the URL doesn't mean it's done. The request trail is kept for the log.
 const UPLOAD_HOOK: &str = r#"(() => {
-  const st = window.__s2i = { started: false, loaded: 0, total: 0, uploaded: false, added: false, pending: 0, error: null, log: [] };
+  const st = window.__s2i = { started: false, loaded: 0, total: 0, uploaded: false, media: null, added: false, pending: 0, error: null, log: [] };
   const api = u => /api\.imgur\.com/.test(String(u));
   const done = (m, u, s, b) => {
     st.pending--;
@@ -161,7 +161,10 @@ const UPLOAD_HOOK: &str = r#"(() => {
           let m = String(this.responseText);
           try { const j = JSON.parse(m); m = (j.data && j.data.error) || m; } catch (e) {}
           st.error = 'Imgur rejected the upload (HTTP ' + this.status + '): ' + String(m).slice(0, 300);
-        } else st.uploaded = true;
+        } else {
+          st.uploaded = true;
+          try { st.media = JSON.parse(this.responseText).data.id; } catch (e) {}
+        }
       });
       this.addEventListener('error', () => { st.error = 'The upload failed (network error).'; });
     }
@@ -169,7 +172,7 @@ const UPLOAD_HOOK: &str = r#"(() => {
   };
 })();"#;
 
-const UPLOAD_STATE: &str = "({ href: location.href, input: !!document.getElementById('file-input'), s: window.__s2i || null })";
+const UPLOAD_STATE: &str = "({ input: !!document.getElementById('file-input'), s: window.__s2i || null })";
 
 fn upload(b: &Browser, path: &std::path::Path, send: &dyn Fn(Event)) -> Result<String> {
     let path = std::path::absolute(path)?;
@@ -238,7 +241,7 @@ fn upload(b: &Browser, path: &std::path::Path, send: &dyn Fn(Event)) -> Result<S
         // gone quiet (it updates the post right after attaching).
         let attached = s["uploaded"].as_bool().unwrap_or(false) && s["added"].as_bool().unwrap_or(false);
         idle_polls = if attached && s["pending"].as_i64() == Some(0) { idle_polls + 1 } else { 0 };
-        Ok(post_link(st["href"].as_str().unwrap_or_default()).filter(|_| idle_polls >= 2))
+        Ok(s["media"].as_str().and_then(gifv_link).filter(|_| idle_polls >= 2))
     });
     if result.is_err() {
         if let Some(log) = b.exec("window.__s2i && window.__s2i.log").ok().as_ref().and_then(Value::as_array) {
@@ -250,11 +253,11 @@ fn upload(b: &Browser, path: &std::path::Path, send: &dyn Fn(Event)) -> Result<S
     result.context("uploading to Imgur")
 }
 
-/// After an upload the page moves to the new post, `https://imgur.com/a/<id>`.
-fn post_link(href: &str) -> Option<String> {
-    let rest = href.strip_prefix("https://imgur.com/a/")?;
-    let id: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
-    (!id.is_empty()).then(|| format!("https://imgur.com/a/{id}"))
+/// The link Discord embeds as an autoplaying looping video. The post page the uploader
+/// lands on (`imgur.com/a/<id>`) is an untitled, accountless album that Imgur previews
+/// only as a generic "Imgur" card, while `i.imgur.com/<id>.gifv` carries `og:video`.
+fn gifv_link(id: &str) -> Option<String> {
+    (!id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric())).then(|| format!("https://i.imgur.com/{id}.gifv"))
 }
 
 thread_local! {
