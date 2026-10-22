@@ -312,7 +312,7 @@ impl SettingsApp {
                     });
             });
             divider(ui);
-            row(ui, "Drag out format", "What gets dragged out of the preview popup.", |ui| {
+            row(ui, "Drag out format", "What gets dragged out of the preview popup after recording.", |ui| {
                 segmented(ui, "drag_format", &mut self.cfg.drag_format, &[(DragFormat::Mp4, "MP4"), (DragFormat::Gif, "GIF")]);
             });
             helper(
@@ -449,7 +449,8 @@ impl SettingsApp {
             FontId::new(16.0, icons()),
             if self.listening { ACCENT } else { WEAK },
         );
-        p.galley(Pos2::new(x + 24.0, rect.center().y - galley.size().y / 2.0), galley, TEXT);
+        let y = centered_galley_pos(&galley, rect.center()).y;
+        p.galley(Pos2::new(x + 24.0, y), galley, TEXT);
 
         if resp.clicked() {
             self.listening = !self.listening;
@@ -806,6 +807,20 @@ enum Kind {
     Warning,
 }
 
+/// Where to paint a one-line galley so its visible glyphs, cap top to baseline, sit centered on `center`.
+/// Centering the galley's box puts Segoe UI text low, because its line box has more room above the caps
+/// than below the baseline.
+fn centered_galley_pos(galley: &egui::Galley, center: Pos2) -> Pos2 {
+    let ink = galley.rows.first().and_then(|row| {
+        let glyphs = row.glyphs.iter().filter(|g| !g.uv_rect.is_nothing());
+        let top = glyphs.map(|g| g.pos.y + g.uv_rect.offset.y).reduce(f32::min)?;
+        let baseline = row.glyphs.first()?.pos.y;
+        Some((row.pos.y + top, row.pos.y + baseline))
+    });
+    let mid_y = ink.map_or(galley.size().y / 2.0, |(top, baseline)| (top + baseline) / 2.0);
+    Pos2::new(center.x - galley.size().x / 2.0, (center.y - mid_y).round())
+}
+
 /// A button that lifts and casts a soft shadow on hover.
 fn button(ui: &mut Ui, text: &str, kind: Kind, enabled: bool) -> egui::Response {
     let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(14.0), TEXT);
@@ -826,7 +841,7 @@ fn button(ui: &mut Ui, text: &str, kind: Kind, enabled: bool) -> egui::Response 
         p.add(shadow.as_shape(rect, CornerRadius::same(8)));
     }
     p.rect(rect, 8, dim(fill), Stroke::new(1.0, dim(stroke)), StrokeKind::Inside);
-    p.galley(rect.center() - galley.size() / 2.0, galley, dim(fg));
+    p.galley(centered_galley_pos(&galley, rect.center()), galley, dim(fg));
     if enabled {
         resp.on_hover_cursor(egui::CursorIcon::PointingHand)
     } else {
